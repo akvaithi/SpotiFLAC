@@ -1,0 +1,10 @@
+.git
+.github
+frontend
+build
+PLAN.md
+*.md
+!go.mod
+!go.sum
+Screenshot*
+*.png

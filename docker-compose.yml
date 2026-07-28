@@ -1,0 +1,20 @@
+services:
+  spotiflac:
+    build: .
+    # Or use a prebuilt image you push to a registry:
+    # image: ghcr.io/youruser/spotiflac-web:latest
+    container_name: spotiflac
+    ports:
+      - "8080:8080"
+    volumes:
+      # Left side = path on your ZimaOS host. Adjust to your shares.
+      - /DATA/Media/Music:/downloads
+      - /DATA/AppData/spotiflac:/config
+    environment:
+      - ADDR=:8080
+      - DOWNLOAD_DIR=/downloads
+      - CONFIG_DIR=/config
+      # Optional: if behind a reverse proxy, set the externally-visible URL so
+      # the Cloudflare verification callback resolves correctly.
+      # - PUBLIC_URL=https://spotiflac.example.com
+    restart: unless-stopped
