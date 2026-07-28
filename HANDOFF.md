@@ -16,8 +16,12 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
   - App: `http://<zimaos-ip>:8080`  ·  Gateway: `http://<zimaos-ip>:8081`
   - Shared config volume: `/DATA/AppData/spotiflac/config` (both containers)
   - Music/library + downloads: `/DATA/Media/Music` → `/downloads`
-  - Gateway container IP has been stable at `172.17.0.12`; the user's saved
-    "Custom Tidal API URL" points there.
+  - Both containers use `network_mode: bridge` (the default docker0 bridge), so
+    **container IPs shift on every recreate** and container-name DNS does not
+    work. The gateway moved `172.17.0.12` → `172.17.0.11` on the 2026-07-28
+    deploy and silently broke the saved "Custom Tidal API URL". The saved URL is
+    now `http://172.17.0.1:8081` — docker0's host gateway plus the gateway's
+    published port — which survives recreates. Don't put a container IP back.
 
 ## Access / deploy
 - Deploys are done by pulling the new images on the server:
@@ -25,10 +29,10 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
   sudo docker compose -f /DATA/.casaos/apps/spotiflac/docker-compose.yml pull
   sudo docker compose -f /DATA/.casaos/apps/spotiflac/docker-compose.yml up -d
   ```
-- Earlier deploys were done over SSH with `sshpass` from the user's Mac. **The SSH
-  password was rotated** (user was advised to), so that access no longer works and
-  is not stored anywhere. Assume manual deploy by the user, or ask them to re-share
-  access if needed. Do NOT keep credentials in the repo.
+- Deploys are done over SSH with `sshpass` from the user's Mac (`akvaithi@` the
+  ZimaOS box; `sudo` needs the same password piped in — there's no TTY). The
+  password is **not stored anywhere and must not be**: ask the user for it each
+  time. Do NOT keep credentials in the repo.
 
 ## Done so far (chronological highlights)
 1. Ported Wails desktop app → HTTP server + web UI + reflection RPC + SSE.
@@ -42,12 +46,19 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
    already owned. Removed the audio-tools (convert/resample) tab.
 7. **No-FLAC fallback**: `allow_lossy_fallback` (default on) so tracks without a
    FLAC download the best available instead of failing.
+8. **Spotify→Tidal rematch** (`backend/tidal_rematch.go` + gateway `/search/`):
+   song.link's Tidal ID is often unplayable for this account, which surfaced as
+   `502` / "all requested Tidal qualities failed"; failed tracks now retry
+   against alternate IDs found by ISRC/name search.
+9. **Duplicate cleanup** (`library_dedup.go`): per-file index (v2), incremental
+   rescans, index auto-updates as downloads finish, and a Library-tab review
+   list that trashes redundant copies into `<library>/.spotiflac-trash/`.
 
 ## Pending / not yet deployed
-- **Deploy the latest image** — the no-FLAC-fallback change (commit "fall back to
-  best available quality when a track has no FLAC") is pushed and built, but the
-  final `docker compose pull && up -d` on the server was NOT run by us (SSH
-  password had changed). The user needs to run it.
+- Nothing. Deployed and verified on 2026-07-28: both images pulled, containers
+  recreated, `/search/` confirmed working against live Tidal, and the new
+  library RPCs answering. The pre-v2 library index on the server was discarded
+  by design — **the user needs to hit "Scan library" once** to rebuild it.
 
 ## Possible next steps (user may ask)
 - **Honest `.m4a` for no-FLAC tracks**: currently the no-FLAC path transcodes the
