@@ -17,6 +17,7 @@ even with a paid account — you accept that responsibility.
 import json
 import os
 import threading
+import time
 from datetime import datetime
 
 import requests
@@ -152,6 +153,34 @@ def _login_page(err, done=False, already=False):
     )
 
 
+def _tidal_get(path, params, tries=3):
+    """GET api.tidal.com with the session token, refreshing on 401 and backing
+    off on 429/5xx. Returns the last requests.Response."""
+    r = None
+    for attempt in range(tries):
+        r = requests.get(
+            f"{API}/{path}",
+            params={**params, "countryCode": _session.country_code},
+            headers={"Authorization": f"Bearer {_session.access_token}"},
+            timeout=30,
+        )
+        if r.status_code == 401 and attempt == 0:
+            # Token died mid-run (common on long playlist downloads).
+            try:
+                with _lock:
+                    if _session.token_refresh(_session.refresh_token):
+                        _save()
+                continue
+            except Exception as e:  # noqa
+                print("token refresh failed:", e, flush=True)
+        if r.status_code == 429 or r.status_code >= 500:
+            if attempt < tries - 1:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+        break
+    return r
+
+
 @app.route("/track/")
 def track():
     tid = request.args.get("id")
@@ -163,15 +192,14 @@ def track():
         return gate
     refresh_if_needed()
 
-    r = requests.get(
-        f"{API}/tracks/{tid}/playbackinfopostpaywall",
-        params={"audioquality": q, "playbackmode": "STREAM",
-                "assetpresentation": "FULL", "countryCode": _session.country_code},
-        headers={"Authorization": f"Bearer {_session.access_token}"},
-        timeout=30,
-    )
+    r = _tidal_get(f"tracks/{tid}/playbackinfopostpaywall",
+                   {"audioquality": q, "playbackmode": "STREAM",
+                    "assetpresentation": "FULL"})
     if r.status_code != 200:
-        return jsonify({"error": f"tidal returned {r.status_code}", "body": r.text[:300]}), 502
+        print(f"track {tid} ({q}): tidal returned {r.status_code}: {r.text[:200]}", flush=True)
+        return jsonify({"error": f"tidal returned {r.status_code}",
+                        "tidal_status": r.status_code,
+                        "body": r.text[:300]}), 502
     d = r.json()
     return jsonify({"data": {
         "trackId": int(tid),
@@ -180,6 +208,82 @@ def track():
         "manifest": d.get("manifest", ""),
         "audioQuality": d.get("audioQuality", q),
     }})
+
+
+@app.route("/search/")
+def search():
+    """Find alternate Tidal track IDs for a song.
+
+    song.link often maps a Spotify track to a Tidal ID that this account/region
+    can't stream (playbackinfopostpaywall then 404s/401s). SpotiFLAC calls this
+    to pick a working ID instead of failing the track.
+
+        GET /search/?q=<artist title>&isrc=<ISRC>&limit=10
+        -> {"items": [{"id", "title", "artist", "isrc", "duration",
+                       "audioQuality", "streamReady"}, ...]}
+
+    Results are ordered: exact-ISRC + streamable first.
+    """
+    q = (request.args.get("q") or "").strip()
+    isrc = (request.args.get("isrc") or "").strip().upper()
+    if not q:
+        return jsonify({"error": "missing q"}), 400
+    gate = require_login()
+    if gate:
+        return gate
+    refresh_if_needed()
+
+    try:
+        limit = max(1, min(int(request.args.get("limit") or 10), 50))
+    except ValueError:
+        limit = 10
+
+    # /search/tracks is the old shape; /search?types=TRACKS is the current one.
+    # Which is served depends on the client id the PKCE session ended up with.
+    r = _tidal_get("search/tracks", {"query": q, "limit": limit, "offset": 0})
+    raw = None
+    if r.status_code == 200:
+        try:
+            raw = r.json().get("items")
+        except ValueError:
+            raw = None
+    if raw is None:
+        r2 = _tidal_get("search", {"query": q, "types": "TRACKS", "limit": limit, "offset": 0})
+        if r2.status_code == 200:
+            raw = ((r2.json().get("tracks") or {}).get("items")) or []
+        else:
+            print(f"search {q!r}: tidal returned {r.status_code}/{r2.status_code}: "
+                  f"{r.text[:150]} | {r2.text[:150]}", flush=True)
+            return jsonify({"error": f"tidal returned {r2.status_code}",
+                            "tidal_status": r2.status_code,
+                            "body": r2.text[:300]}), 502
+
+    items = []
+    for hit in raw:
+        if not isinstance(hit, dict):
+            continue
+        # /search wraps each hit as {"item": {...}} in some responses.
+        it = hit.get("item") if isinstance(hit.get("item"), dict) else hit
+        artists = it.get("artists") or []
+        items.append({
+            "id": it.get("id"),
+            "title": it.get("title") or "",
+            "version": it.get("version") or "",
+            "artist": (it.get("artist") or {}).get("name")
+                      or (artists[0].get("name") if artists else ""),
+            "isrc": (it.get("isrc") or "").upper(),
+            "duration": it.get("duration") or 0,
+            "audioQuality": it.get("audioQuality") or "",
+            "streamReady": bool(it.get("streamReady", True))
+                           and bool(it.get("allowStreaming", True)),
+        })
+
+    def rank(t):
+        return (0 if (isrc and t["isrc"] == isrc) else 1,
+                0 if t["streamReady"] else 1)
+
+    items.sort(key=rank)
+    return jsonify({"items": items})
 
 
 @app.route("/account")

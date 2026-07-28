@@ -1030,6 +1030,13 @@ func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 			backend.CompleteDownloadItem(itemID, filename, 0)
 		}
 
+		// Keep the dedup index current without a rescan. originalFile differs
+		// when resample/convert ran and kept the source file.
+		noteLibraryFile(filename)
+		if originalFile != "" && originalFile != filename {
+			noteLibraryFile(originalFile)
+		}
+
 		historySource := req.Service
 
 		go func(fPath, track, artist, album, sID, cover, format, source string) {

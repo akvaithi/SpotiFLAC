@@ -396,7 +396,9 @@ async function refreshLibStatus() {
     if (s.scanning) { el.textContent = 'Scanning library…'; setTimeout(refreshLibStatus, 1500); }
     else if (s.error) { el.textContent = 'Scan error: ' + s.error; }
     else if (s.scanned_at) {
-      el.textContent = `Indexed ${s.files} tracks (${s.isrcs} ISRCs) · last scan ${new Date(s.scanned_at).toLocaleString()}`;
+      let t = `Indexed ${s.files} tracks (${s.isrcs} ISRCs) · last scan ${new Date(s.scanned_at).toLocaleString()}`;
+      if (s.updated_at) t += ` · auto-updated ${new Date(s.updated_at).toLocaleString()}`;
+      el.textContent = t;
     } else { el.textContent = 'Not scanned yet — scan to enable duplicate detection.'; }
     state.libIndexed = !!s.scanned_at && !s.scanning;
   } catch {}
@@ -405,6 +407,101 @@ $('scanLib').onclick = async () => {
   $('libStatus').textContent = 'Scanning library…';
   try { await rpc('ScanLibrary', state.server.download_dir); setTimeout(refreshLibStatus, 800); }
   catch (e) { $('libStatus').textContent = 'Error: ' + e.message; }
+};
+
+// ---------- duplicate cleanup ----------
+const mb = n => `${(n || 0).toFixed(1)} MB`;
+
+function renderDuplicates(report) {
+  state.dupes = report;
+  $('dupeCard').hidden = false;
+  const groups = report.groups || [];
+  $('dupeSummary').textContent = groups.length
+    ? `${groups.length} song(s) with extra copies · ${report.total_dupes} redundant file(s) · ${mb(report.reclaim_mb)} reclaimable`
+    : (report.stale ? 'Scan the library first, then look for duplicates.' : 'No duplicates found — nothing to clean up.');
+
+  const wrap = $('dupeGroups');
+  wrap.innerHTML = '';
+  groups.forEach((g, gi) => {
+    const box = document.createElement('div');
+    box.className = 'dupe-group';
+    const warn = g.mixed_albums ? ' <span class="dupe-warn">different albums</span>' : '';
+    box.innerHTML = `<div class="dupe-head">${esc(g.title)} — <span class="muted">${esc(g.artist)}</span>
+      <span class="muted small">· matched by ${g.match_type === 'isrc' ? 'ISRC' : 'name'} · ${mb(g.reclaim_bytes / 1048576)} reclaimable</span>${warn}</div>`;
+    g.files.forEach((f, fi) => {
+      const row = document.createElement('label');
+      row.className = 'dupe-file' + (f.keep ? ' keep' : '');
+      row.innerHTML = `<input type="checkbox" class="dupe-sel" data-path="${esc(f.path)}" ${f.keep ? '' : 'checked'}>
+        <span class="dupe-path">${esc(f.rel_path)}</span>
+        <span class="muted small">${esc(f.format.toUpperCase())} · ${mb(f.size_mb)}${f.keep ? ' · ' + esc(f.reason) : ''}</span>`;
+      box.appendChild(row);
+    });
+    wrap.appendChild(box);
+  });
+  updateDupeSelectionCount();
+}
+
+function selectedDupePaths() {
+  return Array.from(document.querySelectorAll('.dupe-sel:checked')).map(cb => cb.dataset.path);
+}
+
+function updateDupeSelectionCount() {
+  const n = selectedDupePaths().length;
+  $('trashDupes').disabled = $('deleteDupes').disabled = n === 0;
+  $('trashDupes').textContent = n ? `Move ${n} file(s) to trash` : 'Move to trash';
+}
+$('dupeGroups').addEventListener('change', e => { if (e.target.classList.contains('dupe-sel')) updateDupeSelectionCount(); });
+
+$('findDupes').onclick = async () => {
+  $('dupeSummary').textContent = 'Looking for duplicates…';
+  $('dupeCard').hidden = false;
+  try { renderDuplicates(await rpc('FindDuplicates')); }
+  catch (e) { $('dupeSummary').textContent = 'Error: ' + e.message; }
+  refreshTrashInfo();
+};
+$('dupeSelectAll').onclick = () => {
+  document.querySelectorAll('.dupe-file').forEach(row => {
+    row.querySelector('.dupe-sel').checked = !row.classList.contains('keep');
+  });
+  updateDupeSelectionCount();
+};
+$('dupeSelectNone').onclick = () => {
+  document.querySelectorAll('.dupe-sel').forEach(cb => { cb.checked = false; });
+  updateDupeSelectionCount();
+};
+
+async function cleanupDupes(mode) {
+  const paths = selectedDupePaths();
+  if (!paths.length) return;
+  const what = mode === 'delete'
+    ? `Permanently delete ${paths.length} file(s)? This cannot be undone.`
+    : `Move ${paths.length} file(s) to .spotiflac-trash?`;
+  if (!confirm(what)) return;
+  $('dupeSummary').textContent = 'Cleaning up…';
+  try {
+    const res = await rpc('CleanupDuplicates', { paths, mode });
+    let msg = `${mode === 'delete' ? 'Deleted' : 'Moved'} ${res.removed.length} file(s) · freed ${mb(res.freed_mb)}`;
+    if (res.failed && res.failed.length) msg += ` · ${res.failed.length} failed: ${res.failed[0]}`;
+    renderDuplicates(await rpc('FindDuplicates'));
+    $('dupeSummary').textContent = msg;
+    refreshLibStatus();
+    refreshTrashInfo();
+  } catch (e) { $('dupeSummary').textContent = 'Error: ' + e.message; }
+}
+$('trashDupes').onclick = () => cleanupDupes('trash');
+$('deleteDupes').onclick = () => cleanupDupes('delete');
+
+async function refreshTrashInfo() {
+  try {
+    const t = await rpc('GetLibraryTrash');
+    $('trashInfo').textContent = t.files ? `Trash: ${t.files} file(s) · ${mb(t.size_mb)}` : 'Trash is empty.';
+    $('emptyTrash').hidden = !t.files;
+  } catch {}
+}
+$('emptyTrash').onclick = async () => {
+  if (!confirm('Permanently delete everything in .spotiflac-trash?')) return;
+  try { await rpc('EmptyLibraryTrash'); refreshTrashInfo(); }
+  catch (e) { $('trashInfo').textContent = 'Error: ' + e.message; }
 };
 
 // Given the fetched track list, mark which are already in the library.
@@ -521,3 +618,4 @@ async function checkApiStatus() {
   } catch (e) { el.textContent = 'status check failed: ' + e.message; }
 }
 $('checkStatus').onclick = checkApiStatus;
+

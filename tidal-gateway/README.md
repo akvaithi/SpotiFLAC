@@ -25,6 +25,17 @@ That `manifest` is exactly what Tidal returns from
 token. The gateway does the OAuth device login, holds the token, and forwards
 that manifest.
 
+It also serves a search endpoint used to recover from bad Spotify→Tidal matches:
+```
+GET /search/?q=<artist title>&isrc=<ISRC>&limit=10
+-> { "items": [ { "id", "title", "artist", "isrc", "duration",
+                  "audioQuality", "streamReady" }, ... ] }
+```
+song.link frequently resolves a Spotify track to a Tidal ID this account/region
+cannot stream (Tidal answers `playbackinfopostpaywall` with 404/401, which the
+gateway reports as 502). When that happens SpotiFLAC searches here and retries
+with an ID that is actually streamable — ISRC match first, then artist+title.
+
 ## Run it (Docker Compose)
 
 Add a second service next to SpotiFLAC:

@@ -68,12 +68,36 @@ watch `gh run watch` → user pulls on server. Both ghcr packages must be **publ
   available stream to a playable `.flac` instead of failing. (A cleaner `.m4a`
   output would require propagating the extension up through `buildTidalOutputPath`
   and the caller — not yet done.)
-- **Library dedup** (`library.go`): `ScanLibrary(dir)` walks the download folder,
-  reads ISRC + artist/title tags (filename fallback), persists an index to
-  `/config/library-index.json`. `MatchLibrary(items)` flags tracks already present
-  (ISRC exact, else normalized title+first-artist). UI unchecks in-library tracks
-  on album/playlist fetch. Note: Spotify album/playlist track metadata usually
-  lacks ISRC at match time, so matching is effectively name-based.
+- **Library dedup** (`library.go`): `ScanLibrary(dir)` walks the download folder
+  and keeps **one entry per file** (path/size/mtime + ISRC/title/artist/album,
+  filename fallback), persisted to `/config/library-index.json` (v2 format).
+  Rescans are incremental — files whose size+mtime match are reused, never
+  re-tagged — and `noteLibraryFile()` folds each finished download into the index
+  from `DownloadTrack`, so it stays current without a rescan (writes are debounced
+  5s). `MatchLibrary(items)` flags tracks already present (ISRC exact, else
+  normalized title+first-artist). UI unchecks in-library tracks on album/playlist
+  fetch. Note: Spotify album/playlist track metadata usually lacks ISRC at match
+  time, so matching is effectively name-based.
+- **Duplicate cleanup** (`library_dedup.go`): `FindDuplicates()` unions indexed
+  files by ISRC **and** by a *strict* name key (`normStrStrict` keeps
+  parentheticals, so "Song (Live)" never merges with the studio take — `nameKey`
+  stays loose for download-time matching). Best copy per group = lossless >
+  lossy, then largest, then oldest; the rest are suggested for removal.
+  `CleanupDuplicates({paths, mode})` defaults to `trash` (move into
+  `<library>/.spotiflac-trash/<timestamp>/`, `rename` with copy+remove fallback
+  across filesystems) rather than `delete`; it rejects any path outside the
+  library dir since it's RPC-reachable, and the scan walk skips dot-directories
+  so trashed files don't reappear. `GetLibraryTrash`/`EmptyLibraryTrash` manage
+  the trash. UI lives in the Library tab.
+- **Spotify→Tidal rematch** (`backend/tidal_rematch.go`): song.link maps a
+  Spotify track to *a* Tidal ID, often one the account/region can't stream —
+  Tidal 404/401s on `playbackinfopostpaywall`, the gateway turns that into 502,
+  and the track fails even though the same song downloads fine when searched
+  manually. After all qualities fail, `DownloadByURL` asks the gateway's
+  `GET /search/?q=&isrc=` for the same recording under another ID (ISRC match
+  first, then normalized title + first artist) and retries up to 3 candidates.
+  Needs a custom gateway; the community endpoints expose no search. Tidal API
+  errors now carry the response body so the real upstream status is visible.
 - **Tidal gateway = PKCE**: device-login is capped at HIGH/AAC by Tidal; only
   tidalapi's PKCE flow unlocks lossless/hi-res. Login is a browser paste flow at
   `GET/POST /login`. Session persists in `/config/tidal-session.json` (with

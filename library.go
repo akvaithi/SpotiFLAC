@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,9 +18,17 @@ import (
 // Library dedup index.
 //
 // Scans the download/library folder (the user's Navidrome music dir), reads
-// each audio file's tags, and builds an index keyed by ISRC and by a normalized
-// "title|artist" fingerprint. New downloads are matched against it so tracks
-// already in the library can be flagged and skipped instead of re-downloaded.
+// each audio file's tags, and keeps one entry per file. The entry list backs
+// three things:
+//
+//   - MatchLibrary: flag tracks that are already here before downloading them.
+//   - FindDuplicates/CleanupDuplicates: find copies of the same recording that
+//     are already on disk and move the redundant ones to a trash folder.
+//   - Live updates: every finished download is folded into the index, so it
+//     stays current without a rescan (rescans are also incremental — unchanged
+//     files are reused by size+mtime and never re-tagged).
+
+const libraryTrashDirName = ".spotiflac-trash"
 
 type LibraryStats struct {
 	Scanning  bool   `json:"scanning"`
@@ -27,21 +37,42 @@ type LibraryStats struct {
 	ISRCs     int    `json:"isrcs"`
 	NameKeys  int    `json:"name_keys"`
 	ScannedAt string `json:"scanned_at"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+// libraryEntry is one audio file on disk. Size+ModTime let a rescan skip files
+// that haven't changed.
+type libraryEntry struct {
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	ModTime int64  `json:"mtime"`
+	ISRC    string `json:"isrc,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Artist  string `json:"artist,omitempty"`
+	Album   string `json:"album,omitempty"`
 }
 
 type libraryIndex struct {
 	mu       sync.RWMutex
 	scanning bool
 	dir      string
-	isrc     map[string]struct{}
-	names    map[string]struct{}
-	files    int
+	entries  map[string]*libraryEntry // keyed by absolute path
+	isrc     map[string][]string      // ISRC -> paths
+	names    map[string][]string      // loose title|artist -> paths
 	scanned  time.Time
+	updated  time.Time
 	lastErr  string
+
+	saveMu    sync.Mutex
+	saveTimer *time.Timer
 }
 
-var library = &libraryIndex{isrc: map[string]struct{}{}, names: map[string]struct{}{}}
+var library = &libraryIndex{
+	entries: map[string]*libraryEntry{},
+	isrc:    map[string][]string{},
+	names:   map[string][]string{},
+}
 
 var (
 	reParen = regexp.MustCompile(`[\(\[][^\)\]]*[\)\]]`)
@@ -52,6 +83,19 @@ func normStr(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = reParen.ReplaceAllString(s, "")
 	s = reFeat.ReplaceAllString(s, "")
+	return keepAlphanumeric(s)
+}
+
+// normStrStrict keeps parenthetical content, so "Song (Live)" and
+// "Song (Radio Edit)" stay distinct. Used for duplicate grouping, where a false
+// match would delete a track the user meant to keep.
+func normStrStrict(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = reFeat.ReplaceAllString(s, "")
+	return keepAlphanumeric(s)
+}
+
+func keepAlphanumeric(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
@@ -79,6 +123,15 @@ func nameKey(title, artist string) string {
 	return t + "|" + a
 }
 
+func strictKey(title, artist string) string {
+	t := normStrStrict(title)
+	a := normStrStrict(firstArtist(artist))
+	if t == "" {
+		return ""
+	}
+	return t + "|" + a
+}
+
 func libraryIndexPath() string {
 	dir, err := backend.EnsureAppDir()
 	if err != nil {
@@ -88,11 +141,11 @@ func libraryIndexPath() string {
 }
 
 type persistedIndex struct {
-	Dir       string   `json:"dir"`
-	ScannedAt string   `json:"scanned_at"`
-	Files     int      `json:"files"`
-	ISRCs     []string `json:"isrcs"`
-	NameKeys  []string `json:"name_keys"`
+	Version   int             `json:"version"`
+	Dir       string          `json:"dir"`
+	ScannedAt string          `json:"scanned_at"`
+	UpdatedAt string          `json:"updated_at,omitempty"`
+	Entries   []*libraryEntry `json:"entries"`
 }
 
 func (l *libraryIndex) load() {
@@ -111,17 +164,32 @@ func (l *libraryIndex) load() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.dir = pi.Dir
-	l.files = pi.Files
-	l.isrc = make(map[string]struct{}, len(pi.ISRCs))
-	for _, s := range pi.ISRCs {
-		l.isrc[s] = struct{}{}
-	}
-	l.names = make(map[string]struct{}, len(pi.NameKeys))
-	for _, s := range pi.NameKeys {
-		l.names[s] = struct{}{}
+	l.entries = make(map[string]*libraryEntry, len(pi.Entries))
+	for _, e := range pi.Entries {
+		if e != nil && e.Path != "" {
+			l.entries[e.Path] = e
+		}
 	}
 	if t, err := time.Parse(time.RFC3339, pi.ScannedAt); err == nil {
 		l.scanned = t
+	}
+	if t, err := time.Parse(time.RFC3339, pi.UpdatedAt); err == nil {
+		l.updated = t
+	}
+	l.reindexLocked()
+}
+
+// reindexLocked rebuilds the lookup maps from entries. Caller holds the lock.
+func (l *libraryIndex) reindexLocked() {
+	l.isrc = make(map[string][]string, len(l.entries))
+	l.names = make(map[string][]string, len(l.entries))
+	for path, e := range l.entries {
+		if e.ISRC != "" {
+			l.isrc[e.ISRC] = append(l.isrc[e.ISRC], path)
+		}
+		if k := nameKey(e.Title, e.Artist); k != "" {
+			l.names[k] = append(l.names[k], path)
+		}
 	}
 }
 
@@ -131,14 +199,21 @@ func (l *libraryIndex) save() {
 		return
 	}
 	l.mu.RLock()
-	pi := persistedIndex{Dir: l.dir, Files: l.files, ScannedAt: l.scanned.Format(time.RFC3339)}
-	for k := range l.isrc {
-		pi.ISRCs = append(pi.ISRCs, k)
+	pi := persistedIndex{
+		Version:   2,
+		Dir:       l.dir,
+		ScannedAt: l.scanned.Format(time.RFC3339),
+		Entries:   make([]*libraryEntry, 0, len(l.entries)),
 	}
-	for k := range l.names {
-		pi.NameKeys = append(pi.NameKeys, k)
+	if !l.updated.IsZero() {
+		pi.UpdatedAt = l.updated.Format(time.RFC3339)
+	}
+	for _, e := range l.entries {
+		pi.Entries = append(pi.Entries, e)
 	}
 	l.mu.RUnlock()
+
+	sort.Slice(pi.Entries, func(i, j int) bool { return pi.Entries[i].Path < pi.Entries[j].Path })
 	if data, err := json.Marshal(pi); err == nil {
 		tmp := p + ".tmp"
 		if os.WriteFile(tmp, data, 0o644) == nil {
@@ -147,13 +222,24 @@ func (l *libraryIndex) save() {
 	}
 }
 
+// saveSoon coalesces writes: a playlist download touches the index once per
+// track, and the index file is rewritten whole.
+func (l *libraryIndex) saveSoon() {
+	l.saveMu.Lock()
+	defer l.saveMu.Unlock()
+	if l.saveTimer != nil {
+		l.saveTimer.Stop()
+	}
+	l.saveTimer = time.AfterFunc(5*time.Second, l.save)
+}
+
 func (l *libraryIndex) stats() LibraryStats {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	s := LibraryStats{
 		Scanning: l.scanning,
 		Dir:      l.dir,
-		Files:    l.files,
+		Files:    len(l.entries),
 		ISRCs:    len(l.isrc),
 		NameKeys: len(l.names),
 		Error:    l.lastErr,
@@ -161,10 +247,81 @@ func (l *libraryIndex) stats() LibraryStats {
 	if !l.scanned.IsZero() {
 		s.ScannedAt = l.scanned.Format(time.RFC3339)
 	}
+	if !l.updated.IsZero() {
+		s.UpdatedAt = l.updated.Format(time.RFC3339)
+	}
 	return s
 }
 
-// ScanLibrary (re)builds the dedup index by walking dir and reading tags.
+type scannedFile struct {
+	path    string
+	size    int64
+	modTime int64
+}
+
+// walkLibraryFiles lists audio files, skipping hidden directories so the trash
+// folder (and anything else dot-prefixed) never lands back in the index.
+func walkLibraryFiles(dir string) ([]scannedFile, error) {
+	var out []scannedFile
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path != dir && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(name, ".") || !isLibraryAudioExt(filepath.Ext(name)) {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil
+		}
+		out = append(out, scannedFile{path: path, size: info.Size(), modTime: info.ModTime().Unix()})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to walk library: %w", err)
+	}
+	return out, nil
+}
+
+func isLibraryAudioExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".flac", ".mp3", ".m4a", ".aac":
+		return true
+	}
+	return false
+}
+
+// readLibraryEntry tags one file, falling back to the filename when the file
+// has no usable title tag.
+func readLibraryEntry(path string, size, modTime int64) *libraryEntry {
+	e := &libraryEntry{Path: path, Size: size, ModTime: modTime}
+	if meta, err := backend.ReadAudioMetadata(path); err == nil && meta != nil {
+		e.ISRC = strings.ToUpper(strings.TrimSpace(meta.ISRC))
+		e.Title = strings.TrimSpace(meta.Title)
+		e.Artist = strings.TrimSpace(meta.Artist)
+		e.Album = strings.TrimSpace(meta.Album)
+	}
+	if e.Title == "" {
+		// fall back to "Title - Artist" / "Artist - Title" filename
+		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		if parts := strings.SplitN(base, " - ", 2); len(parts) == 2 {
+			e.Title, e.Artist = parts[0], parts[1]
+		} else {
+			e.Title = base
+		}
+	}
+	return e
+}
+
+// ScanLibrary (re)builds the dedup index by walking dir. Files whose size and
+// mtime match the index are reused, so repeat scans are cheap.
 func (a *App) ScanLibrary(dir string) (LibraryStats, error) {
 	if strings.TrimSpace(dir) == "" {
 		dir = serverDownloadDir()
@@ -176,41 +333,26 @@ func (a *App) ScanLibrary(dir string) (LibraryStats, error) {
 	}
 	library.scanning = true
 	library.lastErr = ""
+	previousDir := library.dir
+	known := make(map[string]*libraryEntry, len(library.entries))
+	if previousDir == dir {
+		for path, e := range library.entries {
+			known[path] = e
+		}
+	}
 	library.mu.Unlock()
 
 	go func() {
-		isrc := map[string]struct{}{}
-		names := map[string]struct{}{}
-		count := 0
-
-		files, err := backend.ListAudioFiles(dir)
-		if err == nil {
-			for _, f := range files {
-				if f.IsDir {
-					continue
-				}
-				count++
-				meta, mErr := backend.ReadAudioMetadata(f.Path)
-				title, artist := "", ""
-				if mErr == nil && meta != nil {
-					if strings.TrimSpace(meta.ISRC) != "" {
-						isrc[strings.ToUpper(strings.TrimSpace(meta.ISRC))] = struct{}{}
-					}
-					title, artist = meta.Title, meta.Artist
-				}
-				if title == "" {
-					// fall back to "Title - Artist" / "Artist - Title" filename
-					base := strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path))
-					if parts := strings.SplitN(base, " - ", 2); len(parts) == 2 {
-						title, artist = parts[0], parts[1]
-					} else {
-						title = base
-					}
-				}
-				if k := nameKey(title, artist); k != "" {
-					names[k] = struct{}{}
-				}
+		files, err := walkLibraryFiles(dir)
+		entries := make(map[string]*libraryEntry, len(files))
+		reused := 0
+		for _, f := range files {
+			if cached, ok := known[f.path]; ok && cached.Size == f.size && cached.ModTime == f.modTime {
+				entries[f.path] = cached
+				reused++
+				continue
 			}
+			entries[f.path] = readLibraryEntry(f.path, f.size, f.modTime)
 		}
 
 		library.mu.Lock()
@@ -219,14 +361,17 @@ func (a *App) ScanLibrary(dir string) (LibraryStats, error) {
 		if err != nil {
 			library.lastErr = err.Error()
 		} else {
-			library.isrc = isrc
-			library.names = names
-			library.files = count
+			library.entries = entries
 			library.scanned = time.Now()
+			library.updated = time.Time{}
+			library.reindexLocked()
 		}
 		library.mu.Unlock()
+
 		if err == nil {
+			fmt.Printf("[Library] Indexed %d files in %s (%d unchanged)\n", len(entries), dir, reused)
 			library.save()
+			emitEvent("library:scanned", library.stats())
 		}
 	}()
 
@@ -235,6 +380,49 @@ func (a *App) ScanLibrary(dir string) (LibraryStats, error) {
 
 func (a *App) GetLibraryStats() LibraryStats {
 	return library.stats()
+}
+
+// noteLibraryFile folds a freshly downloaded file into the index so the next
+// fetch flags it without waiting for a rescan.
+func noteLibraryFile(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() || !isLibraryAudioExt(filepath.Ext(abs)) {
+		return
+	}
+	entry := readLibraryEntry(abs, info.Size(), info.ModTime().Unix())
+
+	library.mu.Lock()
+	if library.dir == "" {
+		library.dir = serverDownloadDir()
+	}
+	library.entries[abs] = entry
+	library.updated = time.Now()
+	library.reindexLocked()
+	library.mu.Unlock()
+
+	library.saveSoon()
+}
+
+// forgetLibraryFiles drops paths that are no longer in the library.
+func forgetLibraryFiles(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	library.mu.Lock()
+	for _, p := range paths {
+		delete(library.entries, p)
+	}
+	library.updated = time.Now()
+	library.reindexLocked()
+	library.mu.Unlock()
+	library.save()
 }
 
 type LibMatchInput struct {
@@ -258,14 +446,14 @@ func (a *App) MatchLibrary(items []LibMatchInput) []LibMatchResult {
 	for _, it := range items {
 		res := LibMatchResult{Index: it.Index}
 		if isrc := strings.ToUpper(strings.TrimSpace(it.ISRC)); isrc != "" {
-			if _, ok := library.isrc[isrc]; ok {
+			if len(library.isrc[isrc]) > 0 {
 				res.InLibrary = true
 				res.MatchType = "isrc"
 			}
 		}
 		if !res.InLibrary {
 			if k := nameKey(it.Title, it.Artist); k != "" {
-				if _, ok := library.names[k]; ok {
+				if len(library.names[k]) > 0 {
 					res.InLibrary = true
 					res.MatchType = "name"
 				}

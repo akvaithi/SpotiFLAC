@@ -234,11 +234,14 @@ func NewTidalDownloader(apiURL string) *TidalDownloader {
 	if !strings.HasPrefix(apiURL, "https://") && !strings.HasPrefix(apiURL, "http://") {
 		apiURL = ""
 	}
+	// 5s was too tight for a self-hosted gateway: it calls Tidal with a 30s
+	// timeout and retries on 429, so a slow-but-successful lookup was being
+	// killed client-side.
 	return &TidalDownloader{
 		client: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: 60 * time.Second,
 		},
-		timeout:    5 * time.Second,
+		timeout:    60 * time.Second,
 		maxRetries: 3,
 		apiURL:     apiURL,
 	}
@@ -315,8 +318,12 @@ func (t *TidalDownloader) GetDownloadURL(trackID int64, quality string) (string,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		fmt.Printf("Tidal API returned status code: %d\n", resp.StatusCode)
-		return "", fmt.Errorf("API returned status code: %d", resp.StatusCode)
+		// Include the body: a self-hosted gateway answers 502 with the real
+		// upstream Tidal status ("tidal returned 404"), which is the only way
+		// to tell an unplayable track ID from an expired session.
+		preview, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		fmt.Printf("Tidal API returned status code: %d: %s\n", resp.StatusCode, preview)
+		return "", fmt.Errorf("API returned status code: %d: %s", resp.StatusCode, strings.TrimSpace(string(preview)))
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -666,35 +673,71 @@ func (t *TidalDownloader) DownloadByURL(tidalURL, outputDir, quality, filenameFo
 	}
 
 	var lastErr error
-	for index, candidateQuality := range qualities {
-		if index > 0 {
-			fmt.Printf("%s unavailable/failed, falling back to %s...\n", qualities[index-1], candidateQuality)
-			outputFilename, alreadyExists, err = buildTidalOutputPath(outputDir, filenameFormat, includeTrackNumber, position, spotifyTrackName, spotifyArtistName, spotifyAlbumName, spotifyAlbumArtist, spotifyReleaseDate, useAlbumTrackNumber, spotifyTrackNumber, spotifyDiscNumber, isrcOverride, useFirstArtistOnly, candidateQuality)
-			if err != nil {
-				return outputFilename, err
+	// Returns fatalErr for cancellations/path errors; per-quality failures are
+	// left in lastErr so the caller can decide to retry another track ID.
+	attemptTrack := func(id int64) (exists bool, fatalErr error) {
+		lastErr = nil
+		for index, candidateQuality := range qualities {
+			if index > 0 {
+				fmt.Printf("%s unavailable/failed, falling back to %s...\n", qualities[index-1], candidateQuality)
+				var pathErr error
+				outputFilename, alreadyExists, pathErr = buildTidalOutputPath(outputDir, filenameFormat, includeTrackNumber, position, spotifyTrackName, spotifyArtistName, spotifyAlbumName, spotifyAlbumArtist, spotifyReleaseDate, useAlbumTrackNumber, spotifyTrackNumber, spotifyDiscNumber, isrcOverride, useFirstArtistOnly, candidateQuality)
+				if pathErr != nil {
+					return false, pathErr
+				}
+				if alreadyExists {
+					return true, nil
+				}
 			}
-			if alreadyExists {
+
+			downloadURL, candidateErr := t.GetDownloadURL(id, candidateQuality)
+			if candidateErr != nil {
+				if IsDownloadCancelledError(candidateErr) {
+					return false, candidateErr
+				}
+				lastErr = candidateErr
+				continue
+			}
+
+			fmt.Printf("Downloading to: %s\n", outputFilename)
+			if candidateErr = t.DownloadFile(downloadURL, outputFilename, candidateQuality); candidateErr == nil {
+				lastErr = nil
+				return false, nil
+			}
+			cleanupTidalDownloadArtifacts(outputFilename)
+			lastErr = candidateErr
+		}
+		return false, nil
+	}
+
+	exists, fatalErr := attemptTrack(trackID)
+	if fatalErr != nil {
+		return outputFilename, fatalErr
+	}
+	if exists {
+		return "EXISTS:" + outputFilename, nil
+	}
+
+	// song.link's Tidal ID is regularly one this account can't stream. Search
+	// the gateway for the same recording under a different ID before failing.
+	if lastErr != nil {
+		isrc := resolveTidalRematchISRC(isrcOverride, spotifyURL)
+		for _, alternateID := range t.findAlternateTidalTrackIDs(trackID, isrc, spotifyTrackName, spotifyArtistName, 3) {
+			fmt.Printf("Tidal track %d failed (%v); retrying with rematched track %d...\n", trackID, lastErr, alternateID)
+			exists, fatalErr = attemptTrack(alternateID)
+			if fatalErr != nil {
+				return outputFilename, fatalErr
+			}
+			if exists {
 				return "EXISTS:" + outputFilename, nil
 			}
-		}
-
-		downloadURL, candidateErr := t.GetDownloadURL(trackID, candidateQuality)
-		if candidateErr != nil {
-			if IsDownloadCancelledError(candidateErr) {
-				return outputFilename, candidateErr
+			if lastErr == nil {
+				fmt.Printf("Rematched to Tidal track %d\n", alternateID)
+				break
 			}
-			lastErr = candidateErr
-			continue
 		}
-
-		fmt.Printf("Downloading to: %s\n", outputFilename)
-		if candidateErr = t.DownloadFile(downloadURL, outputFilename, candidateQuality); candidateErr == nil {
-			lastErr = nil
-			break
-		}
-		cleanupTidalDownloadArtifacts(outputFilename)
-		lastErr = candidateErr
 	}
+
 	if lastErr != nil {
 		return outputFilename, fmt.Errorf("all requested Tidal qualities failed: %w", lastErr)
 	}

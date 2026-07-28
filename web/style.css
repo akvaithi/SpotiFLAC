@@ -75,6 +75,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .st.completed{color:var(--accent)} .st.failed{color:var(--danger)}
 .st.downloading{color:#e6c02a} .st.skipped{color:var(--muted)}
 
+.dupe-group{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:10px;background:var(--panel2)}
+.dupe-head{font-weight:600;margin-bottom:6px}
+.dupe-warn{color:#e6c02a;font-size:12px;font-weight:400}
+.dupe-file{display:flex;align-items:center;gap:10px;padding:5px 0;cursor:pointer}
+.dupe-file.keep{opacity:.75}
+.dupe-file .dupe-path{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}
+.dupe-file.keep .dupe-path{color:var(--accent)}
+
 .filerow{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border)}
 .filerow .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .filerow .sz{color:var(--muted);font-size:12px;flex:none}
