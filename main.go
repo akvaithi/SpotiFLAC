@@ -134,6 +134,9 @@ func staticHandler() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Never cache the UI, so pulling a new image always serves fresh
+		// HTML/JS/CSS instead of a stale browser copy.
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
 		// FileServer serves index.html for "/" automatically. For unknown
 		// non-asset paths, fall back to index.html (SPA-style routing).
 		if r.URL.Path != "/" && !strings.Contains(r.URL.Path[1:], ".") {

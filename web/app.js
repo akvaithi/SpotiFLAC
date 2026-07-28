@@ -213,6 +213,14 @@ function trackRowHTML(t, withCheckbox) {
 }
 
 // ---------- download ----------
+function gatewayURL(id, key) {
+  // Prefer the live Settings field (works even if "Save" wasn't clicked),
+  // fall back to the saved setting.
+  const el = $(id);
+  const fromField = el && el.value ? el.value.trim() : '';
+  return fromField || (state.settings && state.settings[key]) || '';
+}
+
 function buildRequest(t) {
   const s = state.settings || {};
   return {
@@ -229,8 +237,8 @@ function buildRequest(t) {
     embed_lyrics: !!s.embedLyrics,
     save_cover: !!s.saveCover,
     allow_fallback: s.allowFallback !== false,
-    tidal_api_url: s.tidalApiUrl || '',
-    qobuz_api_url: s.qobuzApiUrl || '',
+    tidal_api_url: gatewayURL('setTidalApi', 'tidalApiUrl'),
+    qobuz_api_url: gatewayURL('setQobuzApi', 'qobuzApiUrl'),
   };
 }
 
@@ -416,6 +424,7 @@ function applySettingsToUI() {
   $('setTidalApi').value = s.tidalApiUrl || '';
   $('setQobuzApi').value = s.qobuzApiUrl || '';
   if (s.service) $('service').value = s.service;
+  updateGatewayIndicator();
 }
 
 $('saveApis').onclick = async () => {
@@ -427,20 +436,48 @@ $('saveApis').onclick = async () => {
   try { await rpc('SaveSettings', s); state.settings = s; msg.className = 'msg ok'; msg.textContent = 'Saved.'; }
   catch (e) { msg.className = 'msg err'; msg.textContent = e.message; }
 };
+async function persistGateway() {
+  const s = Object.assign({}, state.settings, {
+    tidalApiUrl: $('setTidalApi').value.trim(),
+    qobuzApiUrl: $('setQobuzApi').value.trim(),
+  });
+  try { await rpc('SaveSettings', s); state.settings = s; } catch {}
+  updateGatewayIndicator();
+}
 $('testTidal').onclick = async () => {
   const url = $('setTidalApi').value.trim(); const m = $('tidalApiMsg');
   if (!url) { m.textContent = 'Enter a URL first.'; return; }
   m.textContent = 'Testing…';
-  try { const ok = await rpc('CheckCustomTidalAPI', url); m.textContent = ok ? '✅ online (returns a FULL manifest)' : '❌ not responding correctly'; }
-  catch (e) { m.textContent = '❌ ' + e.message; }
+  try {
+    const ok = await rpc('CheckCustomTidalAPI', url);
+    m.textContent = ok ? '✅ online — saved and active for Tidal downloads' : '❌ not responding correctly';
+    if (ok) await persistGateway();
+  } catch (e) { m.textContent = '❌ ' + e.message; }
 };
 $('testQobuz').onclick = async () => {
   const url = $('setQobuzApi').value.trim(); const m = $('qobuzApiMsg');
   if (!url) { m.textContent = 'Enter a URL first.'; return; }
   m.textContent = 'Testing…';
-  try { const ok = await rpc('CheckCustomQobuzAPI', url); m.textContent = ok ? '✅ online (returns a download URL)' : '❌ not responding correctly'; }
-  catch (e) { m.textContent = '❌ ' + e.message; }
+  try {
+    const ok = await rpc('CheckCustomQobuzAPI', url);
+    m.textContent = ok ? '✅ online — saved and active for Qobuz downloads' : '❌ not responding correctly';
+    if (ok) await persistGateway();
+  } catch (e) { m.textContent = '❌ ' + e.message; }
 };
+
+function updateGatewayIndicator() {
+  const svc = $('service').value;
+  const t = gatewayURL('setTidalApi', 'tidalApiUrl');
+  const q = gatewayURL('setQobuzApi', 'qobuzApiUrl');
+  const el = $('gatewayIndicator');
+  if (!el) return;
+  let active = '';
+  if (svc === 'tidal' && t) active = 'your Tidal gateway';
+  else if (svc === 'qobuz' && q) active = 'your Qobuz gateway';
+  if (active) { el.textContent = '● Using ' + active + ' (community servers bypassed)'; el.style.display = 'block'; }
+  else { el.style.display = 'none'; }
+}
+$('service').addEventListener('change', updateGatewayIndicator);
 $('saveSettings').onclick = async () => {
   const s = Object.assign({}, state.settings, {
     downloadPath: $('setDownloadPath').value.trim(),
