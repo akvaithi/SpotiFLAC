@@ -24,15 +24,23 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
     published port — which survives recreates. Don't put a container IP back.
 
 ## Access / deploy
-- Deploys are done by pulling the new images on the server:
+- A deploy is CI building the images, then pulling them on the server:
   ```bash
   sudo docker compose -f /DATA/.casaos/apps/spotiflac/docker-compose.yml pull
   sudo docker compose -f /DATA/.casaos/apps/spotiflac/docker-compose.yml up -d
   ```
-- Deploys are done over SSH with `sshpass` from the user's Mac (`akvaithi@` the
-  ZimaOS box; `sudo` needs the same password piped in — there's no TTY). The
-  password is **not stored anywhere and must not be**: ask the user for it each
-  time. Do NOT keep credentials in the repo.
+- That runs over SSH with `sshpass` from the user's Mac; `sudo` on the box
+  has no TTY, so the password is piped into `sudo -S`. Force password auth
+  (`-o PreferredAuthentications=password -o PubkeyAuthentication=no`) — a bare
+  `ssh` sometimes fails with `Permission denied (publickey,password)` first.
+- **Credentials are not in this repo and must never be.** Host, user and the full
+  command live in the operator's user-level `~/.claude/CLAUDE.md`; the password is
+  read from the macOS Keychain at the moment of use
+  (`security find-generic-password -s spotiflac-deploy -w`). If that lookup fails,
+  ask the user — don't put the value in a file or a commit.
+- **Always re-check the saved Tidal gateway URL after a deploy.** Recreating
+  containers changes their bridge IPs; the saved URL must stay
+  `http://172.17.0.1:8081`, never a `172.17.0.x` container IP.
 
 ## Done so far (chronological highlights)
 1. Ported Wails desktop app → HTTP server + web UI + reflection RPC + SSE.

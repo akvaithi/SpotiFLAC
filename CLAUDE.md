@@ -48,8 +48,18 @@ present in the image. Don't add cgo — the pure-Go build is why the image is ti
 - `ghcr.io/akvaithi/tidal-gateway:latest`
 
 Flow for any change: edit → `CGO_ENABLED=0 go build` to verify → commit → push →
-watch `gh run watch` → user pulls on server. Both ghcr packages must be **public**
-(user flips this in the GitHub UI once; the CI token can't set package visibility).
+watch `gh run watch` → `docker compose pull && up -d` on the ZimaOS box. Both
+ghcr packages must be **public** (user flips this in the GitHub UI once; the CI
+token can't set package visibility).
+
+Server access (host, user, compose path, the exact `sshpass`/`sudo -S` command)
+lives in the operator's **user-level `~/.claude/CLAUDE.md`**, not here — this
+repo is public. The SSH password is read from the macOS Keychain at the moment
+of use (`security find-generic-password -s spotiflac-deploy -w`); never write it
+into a file, a commit, or the conversation.
+
+After **every** deploy, re-check the saved Tidal gateway URL (see the bridge
+gotcha below) — recreating containers silently invalidates it.
 
 ## Key mechanisms / gotchas
 - **Community Cloudflare verification** (`verify.go`): the verify service
@@ -98,6 +108,12 @@ watch `gh run watch` → user pulls on server. Both ghcr packages must be **publ
   first, then normalized title + first artist) and retries up to 3 candidates.
   Needs a custom gateway; the community endpoints expose no search. Tidal API
   errors now carry the response body so the real upstream status is visible.
+- **Gateway URL must not be a container IP**: both containers run
+  `network_mode: bridge` (the default docker0 bridge), so container IPs shift on
+  every recreate and container-name DNS doesn't resolve. A saved
+  `http://172.17.0.x:8081` breaks on the next deploy and downloads silently fall
+  back to the community servers. Use `http://172.17.0.1:8081` — docker0's host
+  gateway plus the gateway's published port — which is stable.
 - **Tidal gateway = PKCE**: device-login is capped at HIGH/AAC by Tidal; only
   tidalapi's PKCE flow unlocks lossless/hi-res. Login is a browser paste flow at
   `GET/POST /login`. Session persists in `/config/tidal-session.json` (with
