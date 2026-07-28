@@ -70,6 +70,11 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	// Flush the headers now rather than waiting for the first event, so a client
+	// can tell "connected, nothing happening yet" from "still waiting to be let in".
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
 	ch := hub.subscribe()
 	defer hub.unsubscribe(ch)
 

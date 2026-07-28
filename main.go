@@ -42,8 +42,8 @@ func main() {
 		if err := os.MkdirAll(cfg, 0o755); err != nil {
 			log.Printf("warning: could not create CONFIG_DIR %s: %v", cfg, err)
 		}
-		os.Setenv("HOME", cfg)          // unix: os.UserHomeDir()
-		os.Setenv("USERPROFILE", cfg)   // windows fallback
+		os.Setenv("HOME", cfg)        // unix: os.UserHomeDir()
+		os.Setenv("USERPROFILE", cfg) // windows fallback
 	}
 
 	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
@@ -58,15 +58,24 @@ func main() {
 
 	backend.AppVersion = appVersion
 
+	initAPIToken()
+	if apiAuthEnabled() {
+		log.Println("API_TOKEN set: /api/* requires a bearer token")
+	}
+
 	app := NewApp()
 	app.startup()
 	defer app.shutdown(context.Background())
 
+	// Drains the durable download queue so downloads survive a client
+	// disconnecting or the container restarting (see queue.go).
+	startDownloadWorker(app)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/rpc/", withPublicBase(handleRPC(app)))
-	mux.HandleFunc("/api/events", handleEvents)
+	mux.HandleFunc("/api/rpc/", requireAPIToken(withPublicBase(handleRPC(app))))
+	mux.HandleFunc("/api/events", requireAPIToken(handleEvents))
 	mux.HandleFunc("/api/server-info", handleServerInfo)
-	mux.HandleFunc("/api/file", handleFileDownload)
+	mux.HandleFunc("/api/file", requireAPIToken(handleFileDownload))
 	mux.HandleFunc("/api/verify/complete", handleVerifyComplete)
 	mux.Handle("/", staticHandler())
 
@@ -137,6 +146,14 @@ func staticHandler() http.Handler {
 		// Never cache the UI, so pulling a new image always serves fresh
 		// HTML/JS/CSS instead of a stale browser copy.
 		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+
+		// When API_TOKEN is set the UI is behind it too; arriving with
+		// ?token=… drops a cookie so the SPA's own API calls authenticate.
+		rememberTokenCookie(w, r)
+		if !requestHasValidToken(r) {
+			http.Error(w, "missing or invalid API token", http.StatusUnauthorized)
+			return
+		}
 		// FileServer serves index.html for "/" automatically. For unknown
 		// non-asset paths, fall back to index.html (SPA-style routing).
 		if r.URL.Path != "/" && !strings.Contains(r.URL.Path[1:], ".") {

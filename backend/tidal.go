@@ -410,6 +410,7 @@ func (t *TidalDownloader) DownloadFile(url, filepath string, quality string) err
 	defer out.Close()
 
 	pw := NewProgressWriter(out)
+	pw.SetTotalBytes(resp.ContentLength)
 	_, err = io.Copy(pw, resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
@@ -468,6 +469,7 @@ func (t *TidalDownloader) DownloadFromManifest(manifestB64, outputPath string, q
 		defer out.Close()
 
 		pw := NewProgressWriter(out)
+		pw.SetTotalBytes(resp.ContentLength)
 		_, err = io.Copy(pw, resp.Body)
 		if err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
@@ -499,6 +501,7 @@ func (t *TidalDownloader) DownloadFromManifest(manifestB64, outputPath string, q
 		}
 
 		pw := NewProgressWriter(out)
+		pw.SetTotalBytes(resp.ContentLength)
 		_, err = io.Copy(pw, resp.Body)
 		out.Close()
 
@@ -544,6 +547,7 @@ func (t *TidalDownloader) DownloadFromManifest(manifestB64, outputPath string, q
 		var totalBytes int64
 		lastTime := time.Now()
 		var lastBytes int64
+		var lastSpeedMBps float64
 		for i, mediaURL := range mediaURLs {
 			resp, err := doRequest(mediaURL)
 			if err != nil {
@@ -574,10 +578,23 @@ func (t *TidalDownloader) DownloadFromManifest(manifestB64, outputPath string, q
 				bytesDiff := float64(totalBytes - lastBytes)
 				speedMBps = (bytesDiff / (1024 * 1024)) / timeDiff
 				SetDownloadSpeed(speedMBps)
+				lastSpeedMBps = speedMBps
 				lastTime = now
 				lastBytes = totalBytes
 			}
 			SetDownloadProgress(mbDownloaded)
+
+			// This DASH path is the main Tidal route and doesn't go through
+			// ProgressWriter, so report per-item progress here too or clients
+			// watching the queue see a download that never moves. Segments are
+			// near-uniform, so extrapolating from the ones already fetched
+			// gives a usable total for a determinate bar.
+			if itemID := GetCurrentItemID(); itemID != "" {
+				if totalSegments > 0 {
+					SetItemTotalSize(itemID, mbDownloaded/float64(i+1)*float64(totalSegments))
+				}
+				UpdateItemProgress(itemID, mbDownloaded, lastSpeedMBps)
+			}
 
 			fmt.Printf("\rDownloading: %.2f MB (%d/%d segments)", mbDownloaded, i+1, totalSegments)
 		}

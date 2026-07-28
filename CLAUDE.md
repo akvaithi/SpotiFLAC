@@ -21,6 +21,10 @@ the user's own Tidal subscription instead of the shared community servers.
 - `events.go` — SSE hub (`/api/events`) replacing Wails `EventsEmit`. Use
   `emitEvent(name, data)`.
 - `verify.go` — community Cloudflare verification bridge (see below).
+- `queue.go` + `backend/queue_store.go` — durable download queue (see below).
+- `navidrome.go` — Subsonic rescan trigger + status (see below).
+- `auth.go` — optional `API_TOKEN` bearer auth, off by default (see below).
+- `discovery.go` + `backend/discovery.go` — related artists / band members.
 - `library.go` — dedup index (see below).
 - `app.go` — the old Wails bindings, de-Wailsed (dialogs stubbed, events → SSE).
   Holds `DownloadTrack` and all `*App` methods.
@@ -62,6 +66,48 @@ After **every** deploy, re-check the saved Tidal gateway URL (see the bridge
 gotcha below) — recreating containers silently invalidates it.
 
 ## Key mechanisms / gotchas
+- **Durable download queue** (`queue.go`, `backend/queue_store.go`): `DownloadTrack`
+  is blocking and the queue in `backend/progress.go` is display-only — nothing
+  persists or drains it, so `AddToDownloadQueue` alone downloads nothing and a
+  client that disconnects loses its work. `EnqueueDownloads([]DownloadRequest)`
+  instead persists jobs to the **bolt file shared with history** (bucket
+  `DownloadQueueV1`) and a single worker goroutine drains them server-side. Records
+  survive a restart: `ResetInterruptedQueueRecords()` requeues anything left
+  `downloading` at startup. Failures retry up to 3 times with a growing backoff
+  (`NextAttemptAt` gates the claim). RPCs: `GetQueue`, `RetryQueueItem`,
+  `CancelQueueItem`, `ClearQueue`. `DownloadTrack` is untouched, so the web UI
+  still works exactly as before.
+  **The worker must stay serial** — `DownloadTrack` takes no lock and mutates
+  package-level progress globals, so concurrent calls interleave and the first to
+  finish flips `is_downloading` false for all of them. `CancelQueueItem` on the
+  active item calls `ForceStopActiveDownloads`, which cancels *every* in-flight
+  download because the cancellation scope is shared.
+- **Per-item progress over SSE**: `ProgressInfo` is global and can't describe a
+  queue. `backend.SetItemProgressListener` now feeds `download:progress`
+  (`{id, progress_mb, total_mb, speed_mbps}`, throttled to 4/s) and the worker
+  emits `download:item` on every status change. Two paths report progress and
+  **both** need maintaining: `ProgressWriter` (auto-binds to `GetCurrentItemID()`,
+  covers Qobuz/Amazon/direct Tidal) and the **DASH segment loop** in
+  `backend/tidal.go`, which is the main Tidal route and bypasses `ProgressWriter`
+  entirely — it calls `UpdateItemProgress` directly and extrapolates the total from
+  the segments fetched so far.
+- **Navidrome rescan** (`navidrome.go`): the worker POSTs `/rest/startScan` when
+  the queue drains and something landed, so downloads appear without waiting on
+  Navidrome's own watcher. Config from `NAVIDROME_URL`/`NAVIDROME_USER`/
+  `NAVIDROME_PASSWORD` env, else `navidromeUrl`/`navidromeUser`/`navidromePassword`
+  in the server-side `config.json` (never in this repo). Unconfigured is not an
+  error. Also exposed as `TriggerNavidromeScan` / `GetNavidromeStatus`.
+- **Optional API auth** (`auth.go`): the RPC surface reaches `ListDirectoryFiles`
+  on arbitrary paths and had no auth at all. Setting `API_TOKEN` requires a bearer
+  token (or `X-API-Token`, or `?token=`); leaving it unset preserves the old
+  behaviour exactly. Browsers can't set headers on `EventSource` or the SPA's
+  `fetch`, so loading any page with `?token=…` drops a `SameSite=Strict` cookie
+  that the rest of the session uses.
+- **`GetRelatedArtists`** reuses the *same* `queryArtistOverview` persisted-query
+  hash as the discography path and reads `relatedContent.relatedArtists` — no new
+  hash to rot. **`GetArtistMembers`** hits MusicBrainz `artist-rels`; it must dedupe,
+  since MusicBrainz emits one relation per instrument (a 4-instrument member
+  otherwise appears 4×).
 - **Community Cloudflare verification** (`verify.go`): the verify service
   *strictly* requires the callback to be `http://127.0.0.1|localhost:<port>/session-grant`.
   We do NOT rewrite it. User solves the challenge, lands on an unreachable

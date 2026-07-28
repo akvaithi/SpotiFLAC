@@ -157,6 +157,7 @@ func (a *AmazonDownloader) downloadFromCommunity(amazonURL, outputDir, quality s
 
 	fmt.Printf("Downloading track: %s\n", asin)
 	pw := NewProgressWriter(out)
+	pw.SetTotalBytes(dlResp.ContentLength)
 	if _, err = io.Copy(pw, dlResp.Body); err != nil {
 		return "", err
 	}

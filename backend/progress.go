@@ -205,6 +205,7 @@ func SetDownloading(downloading bool) {
 type ProgressWriter struct {
 	writer      io.Writer
 	total       int64
+	expected    int64
 	lastPrinted int64
 	startTime   int64
 	lastTime    int64
@@ -212,6 +213,9 @@ type ProgressWriter struct {
 	itemID      string
 }
 
+// NewProgressWriter binds to whichever queue item is currently downloading, so
+// every existing call site reports per-item progress without having to thread an
+// ID through the downloaders. StartDownloadItem is what sets that ID.
 func NewProgressWriter(writer io.Writer) *ProgressWriter {
 	now := getCurrentTimeMillis()
 	return &ProgressWriter{
@@ -221,7 +225,20 @@ func NewProgressWriter(writer io.Writer) *ProgressWriter {
 		startTime:   now,
 		lastTime:    now,
 		lastBytes:   0,
-		itemID:      "",
+		itemID:      GetCurrentItemID(),
+	}
+}
+
+// SetTotalBytes records the expected size (typically resp.ContentLength) so
+// clients can render a determinate progress bar. Values <= 0 are ignored, which
+// is the honest outcome for chunked responses and segmented streams.
+func (pw *ProgressWriter) SetTotalBytes(n int64) {
+	if n <= 0 {
+		return
+	}
+	pw.expected = n
+	if pw.itemID != "" {
+		SetItemTotalSize(pw.itemID, float64(n)/(1024*1024))
 	}
 }
 
@@ -322,10 +339,22 @@ func StartDownloadItem(id string) {
 	currentItemLock.Unlock()
 }
 
+// itemProgressListener lets the HTTP layer push per-item progress out over SSE.
+// The pre-existing ProgressInfo is global (one download at a time), which can't
+// describe a queue; this is per-item and is what clients should watch.
+var (
+	itemProgressListener   func(id string, progressMB, speedMBps float64)
+	itemProgressListenerMu sync.RWMutex
+)
+
+func SetItemProgressListener(fn func(id string, progressMB, speedMBps float64)) {
+	itemProgressListenerMu.Lock()
+	itemProgressListener = fn
+	itemProgressListenerMu.Unlock()
+}
+
 func UpdateItemProgress(id string, progress, speed float64) {
 	downloadQueueLock.Lock()
-	defer downloadQueueLock.Unlock()
-
 	for i := range downloadQueue {
 		if downloadQueue[i].ID == id {
 			downloadQueue[i].Progress = progress
@@ -333,12 +362,33 @@ func UpdateItemProgress(id string, progress, speed float64) {
 			break
 		}
 	}
+	downloadQueueLock.Unlock()
+
+	itemProgressListenerMu.RLock()
+	listener := itemProgressListener
+	itemProgressListenerMu.RUnlock()
+	if listener != nil {
+		listener(id, progress, speed)
+	}
 }
 
 func GetCurrentItemID() string {
 	currentItemLock.RLock()
 	defer currentItemLock.RUnlock()
 	return currentItemID
+}
+
+// SetItemTotalSize records an item's expected size in MB before it finishes, so
+// a client can show a determinate bar rather than a bare byte counter.
+func SetItemTotalSize(id string, totalMB float64) {
+	downloadQueueLock.Lock()
+	for i := range downloadQueue {
+		if downloadQueue[i].ID == id {
+			downloadQueue[i].TotalSize = totalMB
+			break
+		}
+	}
+	downloadQueueLock.Unlock()
 }
 
 func CompleteDownloadItem(id, filePath string, finalSize float64) {

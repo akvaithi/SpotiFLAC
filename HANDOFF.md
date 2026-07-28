@@ -62,6 +62,15 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
    rescans, index auto-updates as downloads finish, and a Library-tab review
    list that trashes redundant copies into `<library>/.spotiflac-trash/`.
 
+10. **Durable download queue + client API** (2026-07-28), built for the Harmony
+    macOS client (`~/Developer/Harmony`, https://github.com/akvaithi/Harmony) but
+    useful on its own: `EnqueueDownloads` persists jobs to bolt and a server-side
+    worker drains them, so downloads survive a client disconnecting *and* a
+    container restart; per-item `download:item` / `download:progress` SSE events
+    replace polling; the worker triggers a Navidrome `/rest/startScan` when the
+    queue drains; `GetRelatedArtists` / `GetArtistMembers` for browsing;
+    and an optional `API_TOKEN` (off by default) for the previously wide-open API.
+
 ## Pending / not yet deployed
 - Nothing. Deployed and verified on 2026-07-28: both images pulled, containers
   recreated, `/search/` confirmed working against live Tidal, and the new
@@ -84,5 +93,10 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
   them. We deliberately do NOT bypass those limits.
 - No-FLAC fallback files are `.flac` but sourced from AAC (Tidal has no lossless
   for that track) — playable, not audiophile-lossless.
-- Single active download queue (matches upstream); fine for one user.
+- Single active download queue (matches upstream); fine for one user. The durable
+  queue worker is deliberately serial for the same reason — `DownloadTrack` shares
+  package-level progress state, so parallel downloads would corrupt it.
+- Local smoke tests can't finish a download on macOS: `ffmpeg` isn't installed, so
+  the FLAC conversion step fails after the bytes arrive. That's environmental (the
+  image ships ffmpeg), but it means "download failed" locally is not a real signal.
 - Everything is ToS-gray personal-use tooling; the user has paid Tidal + Spotify.

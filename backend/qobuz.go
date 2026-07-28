@@ -470,6 +470,7 @@ func (q *QobuzDownloader) DownloadFile(url, filepath string) error {
 	fmt.Println("Downloading...")
 
 	pw := NewProgressWriter(out)
+	pw.SetTotalBytes(resp.ContentLength)
 	_, err = io.Copy(pw, resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
