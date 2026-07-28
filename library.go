@@ -161,6 +161,13 @@ func (l *libraryIndex) load() {
 	if json.Unmarshal(data, &pi) != nil {
 		return
 	}
+	if pi.Version < 2 {
+		// v1 stored only ISRC/name key sets — no file paths, so there's nothing
+		// to migrate. Leave the index empty so the UI asks for a rescan instead
+		// of reporting a scan that can't match or dedup anything.
+		fmt.Println("[Library] Ignoring pre-v2 index (no file paths stored); rescan to rebuild.")
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.dir = pi.Dir
