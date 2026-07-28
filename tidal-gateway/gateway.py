@@ -26,7 +26,17 @@ SESSION_FILE = os.environ.get("SESSION_FILE", "/config/tidal-session.json")
 API = "https://api.tidal.com/v1"
 
 app = Flask(__name__)
-_session = tidalapi.Session()
+
+# Optionally override the Tidal client used for login. The default device-login
+# client is sometimes capped at HIGH/AAC; a different client_id/secret can unlock
+# LOSSLESS/HI_RES for accounts that include it.
+_cfg = tidalapi.Config()
+_cid = os.environ.get("TIDAL_CLIENT_ID")
+_csec = os.environ.get("TIDAL_CLIENT_SECRET")
+if _cid and _csec:
+    _cfg.client_id = _cid
+    _cfg.client_secret = _csec
+_session = tidalapi.Session(_cfg)
 _lock = threading.Lock()
 
 # SpotiFLAC quality string -> Tidal audioquality
@@ -120,6 +130,27 @@ def track():
             "audioQuality": d.get("audioQuality", q),
         }
     })
+
+
+@app.route("/account")
+def account():
+    """Reports your subscription's highest available quality, so we can tell
+    whether HIGH-only is an account limit or a client/login limit."""
+    ensure_login()
+    refresh_if_needed()
+    out = {"user_id": getattr(_session.user, "id", None), "country": _session.country_code}
+    try:
+        uid = _session.user.id
+        r = requests.get(
+            f"{API}/users/{uid}/subscription",
+            params={"countryCode": _session.country_code},
+            headers={"Authorization": f"Bearer {_session.access_token}"},
+            timeout=20,
+        )
+        out["subscription"] = r.json() if r.status_code == 200 else {"status": r.status_code, "body": r.text[:200]}
+    except Exception as e:  # noqa
+        out["subscription_error"] = str(e)
+    return jsonify(out)
 
 
 @app.route("/")
