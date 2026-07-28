@@ -1,22 +1,23 @@
 """
-Minimal self-hosted Tidal gateway for SpotiFLAC.
+Minimal self-hosted Tidal gateway for SpotiFLAC — HI-RES (PKCE) edition.
 
-Logs into Tidal ONCE with your own subscription (OAuth device flow), then serves
-the endpoint SpotiFLAC's "Custom Tidal API URL" expects:
+Logs into Tidal with your own subscription using tidalapi's PKCE flow, which is
+the only way to unlock LOSSLESS / HI-RES FLAC (the device-login flow is capped at
+HIGH/AAC). Serves the endpoint SpotiFLAC's "Custom Tidal API URL" expects:
 
     GET /track/?id=<trackId>&quality=<LOSSLESS|HI_RES_LOSSLESS|HIGH|LOW>
-      -> { "data": { "trackId": <id>, "assetPresentation": "FULL",
+      -> { "data": { "trackId": ..., "assetPresentation": "FULL",
                      "manifestMimeType": "...", "manifest": "<base64>" } }
 
-Point SpotiFLAC (Settings -> Custom Tidal API URL) at http://<this-host>:8081
+Login is a one-time browser step at  http://<this-host>:8081/login
 
-Personal use only. Using this to download almost certainly violates Tidal's ToS,
+Personal use only. Downloading via this almost certainly violates Tidal's ToS,
 even with a paid account — you accept that responsibility.
 """
 import json
 import os
 import threading
-import time
+from datetime import datetime
 
 import requests
 import tidalapi
@@ -27,19 +28,14 @@ API = "https://api.tidal.com/v1"
 
 app = Flask(__name__)
 
-# Optionally override the Tidal client used for login. The default device-login
-# client is sometimes capped at HIGH/AAC; a different client_id/secret can unlock
-# LOSSLESS/HI_RES for accounts that include it.
 _cfg = tidalapi.Config()
-_cid = os.environ.get("TIDAL_CLIENT_ID")
-_csec = os.environ.get("TIDAL_CLIENT_SECRET")
-if _cid and _csec:
-    _cfg.client_id = _cid
-    _cfg.client_secret = _csec
+# Optional override of the PKCE client (advanced; normally not needed).
+if os.environ.get("TIDAL_CLIENT_ID") and os.environ.get("TIDAL_CLIENT_SECRET"):
+    _cfg.client_id_pkce = os.environ["TIDAL_CLIENT_ID"]
+    _cfg.client_secret_pkce = os.environ["TIDAL_CLIENT_SECRET"]
 _session = tidalapi.Session(_cfg)
 _lock = threading.Lock()
 
-# SpotiFLAC quality string -> Tidal audioquality
 QUALITY = {
     "LOW": "LOW",
     "HIGH": "HIGH",
@@ -55,6 +51,7 @@ def _save():
         "access_token": _session.access_token,
         "refresh_token": _session.refresh_token,
         "expiry_time": _session.expiry_time.isoformat() if _session.expiry_time else None,
+        "is_pkce": True,
     }
     os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
     with open(SESSION_FILE, "w") as f:
@@ -64,32 +61,31 @@ def _save():
 def _load():
     if not os.path.exists(SESSION_FILE):
         return False
-    from datetime import datetime
     with open(SESSION_FILE) as f:
         d = json.load(f)
     exp = datetime.fromisoformat(d["expiry_time"]) if d.get("expiry_time") else None
-    return _session.load_oauth_session(d["token_type"], d["access_token"], d["refresh_token"], exp)
+    ok = _session.load_oauth_session(
+        d["token_type"], d["access_token"], d.get("refresh_token"), exp,
+        is_pkce=d.get("is_pkce", True),
+    )
+    if ok:
+        _session.client_enable_hires()  # ensure token refresh uses the PKCE client
+    return ok
 
 
-def ensure_login():
-    with _lock:
+def logged_in():
+    try:
         if _session.access_token and _session.check_login():
-            return
-        if _load() and _session.check_login():
-            return
-        # Interactive device login. The link is printed to the container logs.
-        login, future = _session.login_oauth()
-        print("\n==================  TIDAL LOGIN REQUIRED  ==================", flush=True)
-        print(f"  Open:  https://{login.verification_uri_complete}", flush=True)
-        print("  Log in with your Tidal subscription, then this continues.", flush=True)
-        print("===========================================================\n", flush=True)
-        future.result()  # blocks until you complete the login in your browser
-        _save()
-        print("Tidal login complete. Session saved to", SESSION_FILE, flush=True)
+            return True
+    except Exception:
+        pass
+    try:
+        return _load() and _session.check_login()
+    except Exception:
+        return False
 
 
 def refresh_if_needed():
-    from datetime import datetime
     if _session.expiry_time and datetime.utcnow() >= _session.expiry_time.replace(tzinfo=None):
         try:
             if _session.token_refresh(_session.refresh_token):
@@ -98,56 +94,108 @@ def refresh_if_needed():
             print("token refresh failed:", e, flush=True)
 
 
+def require_login():
+    if not logged_in():
+        return jsonify({"error": "not logged in — open http://<host>:8081/login in a browser"}), 401
+    return None
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        url = (request.form.get("url") or "").strip()
+        if not url and request.is_json:
+            url = (request.get_json(silent=True) or {}).get("url", "").strip()
+        if not url:
+            return _login_page("Please paste the redirect URL."), 400
+        try:
+            with _lock:
+                token = _session.pkce_get_auth_token(url)
+                _session.process_auth_token(token, is_pkce_token=True)
+                _session.client_enable_hires()
+                _save()
+            return _login_page(None, done=True)
+        except Exception as e:  # noqa
+            return _login_page("Login failed: " + str(e)), 400
+    # GET
+    if logged_in():
+        return _login_page(None, already=True)
+    return _login_page(None)
+
+
+def _login_page(err, done=False, already=False):
+    if done:
+        body = "<h2>✅ Logged in with hi-res access.</h2><p>You can close this tab and start downloading in SpotiFLAC.</p>"
+    elif already:
+        body = "<h2>Already logged in.</h2><p>Hi-res access is active.</p>"
+    else:
+        url = _session.pkce_login_url()
+        e = f"<p style='color:#e5484d'>{err}</p>" if err else ""
+        body = f"""
+        <h2>Tidal hi-res login</h2>
+        <ol>
+          <li><a href="{url}" target="_blank" rel="noopener">Click here to log in to Tidal</a> (opens a new tab).</li>
+          <li>Sign in with your subscription. You'll land on an <b>“Oops” / not-found</b> page — that's expected.</li>
+          <li><b>Copy that page's full URL</b> (starts with <code>https://tidal.com/android/login/auth?code=…</code>) and paste it below.</li>
+        </ol>
+        {e}
+        <form method="post">
+          <input name="url" style="width:100%;padding:8px" placeholder="https://tidal.com/android/login/auth?code=..." autofocus>
+          <br><br><button type="submit" style="padding:8px 16px">Complete login</button>
+        </form>
+        """
+    return (
+        "<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Tidal gateway login</title>"
+        "<body style='font:15px/1.6 system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#111'>"
+        + body + "</body>"
+    )
+
+
 @app.route("/track/")
 def track():
     tid = request.args.get("id")
     q = QUALITY.get((request.args.get("quality") or "LOSSLESS").upper(), "LOSSLESS")
     if not tid:
         return jsonify({"error": "missing id"}), 400
-    ensure_login()
+    gate = require_login()
+    if gate:
+        return gate
     refresh_if_needed()
 
     r = requests.get(
         f"{API}/tracks/{tid}/playbackinfopostpaywall",
-        params={
-            "audioquality": q,
-            "playbackmode": "STREAM",
-            "assetpresentation": "FULL",
-            "countryCode": _session.country_code,
-        },
+        params={"audioquality": q, "playbackmode": "STREAM",
+                "assetpresentation": "FULL", "countryCode": _session.country_code},
         headers={"Authorization": f"Bearer {_session.access_token}"},
         timeout=30,
     )
     if r.status_code != 200:
         return jsonify({"error": f"tidal returned {r.status_code}", "body": r.text[:300]}), 502
     d = r.json()
-    return jsonify({
-        "data": {
-            "trackId": int(tid),
-            "assetPresentation": d.get("assetPresentation", "FULL"),
-            "manifestMimeType": d.get("manifestMimeType", ""),
-            "manifest": d.get("manifest", ""),
-            "audioQuality": d.get("audioQuality", q),
-        }
-    })
+    return jsonify({"data": {
+        "trackId": int(tid),
+        "assetPresentation": d.get("assetPresentation", "FULL"),
+        "manifestMimeType": d.get("manifestMimeType", ""),
+        "manifest": d.get("manifest", ""),
+        "audioQuality": d.get("audioQuality", q),
+    }})
 
 
 @app.route("/account")
 def account():
-    """Reports your subscription's highest available quality, so we can tell
-    whether HIGH-only is an account limit or a client/login limit."""
-    ensure_login()
+    gate = require_login()
+    if gate:
+        return gate
     refresh_if_needed()
-    out = {"user_id": getattr(_session.user, "id", None), "country": _session.country_code}
+    out = {"user_id": getattr(_session.user, "id", None), "country": _session.country_code,
+           "is_pkce": getattr(_session, "is_pkce", None)}
     try:
         uid = _session.user.id
-        r = requests.get(
-            f"{API}/users/{uid}/subscription",
-            params={"countryCode": _session.country_code},
-            headers={"Authorization": f"Bearer {_session.access_token}"},
-            timeout=20,
-        )
-        out["subscription"] = r.json() if r.status_code == 200 else {"status": r.status_code, "body": r.text[:200]}
+        r = requests.get(f"{API}/users/{uid}/subscription",
+                         params={"countryCode": _session.country_code},
+                         headers={"Authorization": f"Bearer {_session.access_token}"}, timeout=20)
+        out["subscription"] = r.json() if r.status_code == 200 else {"status": r.status_code}
     except Exception as e:  # noqa
         out["subscription_error"] = str(e)
     return jsonify(out)
@@ -155,13 +203,15 @@ def account():
 
 @app.route("/")
 def health():
-    return jsonify({"ok": True, "logged_in": bool(_session.access_token)})
+    return jsonify({"ok": True, "logged_in": logged_in()})
 
 
 if __name__ == "__main__":
-    # Trigger login at startup so the link appears immediately in the logs.
-    try:
-        ensure_login()
-    except Exception as e:  # noqa
-        print("startup login error (will retry on first request):", e, flush=True)
+    if logged_in():
+        print("Tidal session loaded (hi-res).", flush=True)
+    else:
+        print("\n===============  TIDAL LOGIN REQUIRED  ===============", flush=True)
+        print("  Open in a browser:  http://<your-server-ip>:8081/login", flush=True)
+        print("  (one-time; unlocks hi-res FLAC)", flush=True)
+        print("=====================================================\n", flush=True)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8081")))

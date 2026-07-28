@@ -84,25 +84,19 @@ docker compose ps
 
 ---
 
-## Step 3 — Log in to the Tidal gateway (one time)
+## Step 3 — Log in to the Tidal gateway (one time, hi-res)
 
-The gateway needs a single sign-in with your Tidal subscription:
+The gateway uses Tidal's PKCE login, which is what unlocks **lossless / hi-res FLAC**
+(the simpler device login is capped at AAC).
 
-```bash
-docker compose logs -f tidal-gateway
-```
+1. Open **http://<your-zimaos-ip>:8081/login** in a browser.
+2. Click **"Click here to log in to Tidal"**, sign in with your subscription.
+3. You'll be redirected to an **"Oops" / not-found page** — that's expected.
+4. **Copy that page's full URL** (starts with `https://tidal.com/android/login/auth?code=...`)
+   and paste it into the box, then **Complete login**.
 
-You'll see:
-```
-==================  TIDAL LOGIN REQUIRED  ==================
-  Open:  https://link.tidal.com/XXXXX
-```
-
-Open that link on any device, sign in with your Tidal account, approve. The log
-will then print `Tidal login complete`. Press `Ctrl+C` to stop following the log.
-
-The token is saved to `/config` (the `tidal-gateway` volume) and auto-refreshed —
-you won't repeat this unless it fully expires.
+You should see "Logged in with hi-res access." The token is saved to `/config`
+(the `tidal-gateway` volume) and auto-refreshed — one time only.
 
 ---
 
