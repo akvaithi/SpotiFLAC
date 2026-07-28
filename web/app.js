@@ -242,6 +242,7 @@ function buildRequest(t) {
     embed_lyrics: !!s.embedLyrics,
     save_cover: !!s.saveCover,
     allow_fallback: s.allowFallback !== false,
+    allow_lossy_fallback: s.allowLossy !== false,
     tidal_api_url: gatewayURL('setTidalApi', 'tidalApiUrl'),
     qobuz_api_url: gatewayURL('setQobuzApi', 'qobuzApiUrl'),
   };
@@ -436,6 +437,7 @@ function applySettingsToUI() {
   $('setEmbedLyrics').checked = !!s.embedLyrics;
   $('setSaveCover').checked = !!s.saveCover;
   $('setFallback').checked = s.allowFallback !== false;
+  $('setLossy').checked = s.allowLossy !== false;
   $('setTidalApi').value = s.tidalApiUrl || '';
   $('setQobuzApi').value = s.qobuzApiUrl || '';
   if (s.service) $('service').value = s.service;
@@ -501,6 +503,7 @@ $('saveSettings').onclick = async () => {
     embedLyrics: $('setEmbedLyrics').checked,
     saveCover: $('setSaveCover').checked,
     allowFallback: $('setFallback').checked,
+    allowLossy: $('setLossy').checked,
   });
   const msg = $('settingsMsg'); msg.className = 'msg';
   try { await rpc('SaveSettings', s); state.settings = s; applySettingsToUI(); msg.className = 'msg ok'; msg.textContent = 'Saved.'; }

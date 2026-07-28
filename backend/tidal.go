@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -207,6 +208,23 @@ func finalizeTidalDownload(outputFilename, spotifyTrackName, spotifyArtistName, 
 	} else {
 		fmt.Println("Metadata saved")
 	}
+}
+
+// allowLossyFallback, when true, lets a lossless request fall back to the best
+// available (lossy) format for tracks that have no FLAC, instead of aborting.
+var allowLossyFallbackMu sync.RWMutex
+var allowLossyFallback bool
+
+func SetAllowLossyFallback(v bool) {
+	allowLossyFallbackMu.Lock()
+	allowLossyFallback = v
+	allowLossyFallbackMu.Unlock()
+}
+
+func getAllowLossyFallback() bool {
+	allowLossyFallbackMu.RLock()
+	defer allowLossyFallbackMu.RUnlock()
+	return allowLossyFallback
 }
 
 func NewTidalDownloader(apiURL string) *TidalDownloader {
@@ -405,7 +423,10 @@ func (t *TidalDownloader) DownloadFromManifest(manifestB64, outputPath string, q
 	isLosslessRequested := quality == "LOSSLESS" || quality == "HI_RES" || quality == "HI_RES_LOSSLESS"
 	isActualLossless := strings.Contains(strings.ToLower(mimeType), "flac") || mimeType == ""
 	if isLosslessRequested && !isActualLossless {
-		return fmt.Errorf("requested %s quality but Tidal provided lossy format (%s). Aborting download", quality, mimeType)
+		if !getAllowLossyFallback() {
+			return fmt.Errorf("requested %s quality but Tidal provided lossy format (%s). Aborting download", quality, mimeType)
+		}
+		fmt.Printf("No lossless available for this track; downloading best available format (%s).\n", mimeType)
 	}
 
 	client := &http.Client{

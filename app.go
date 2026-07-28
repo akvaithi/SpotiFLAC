@@ -379,6 +379,7 @@ type DownloadRequest struct {
 	PlaylistName               string `json:"playlist_name,omitempty"`
 	PlaylistOwner              string `json:"playlist_owner,omitempty"`
 	AllowFallback              bool   `json:"allow_fallback"`
+	AllowLossyFallback         bool   `json:"allow_lossy_fallback"`
 	AllowAtmosFallback         bool   `json:"allow_atmos_fallback"`
 	AtmosFallbackQuality       string `json:"atmos_fallback_quality,omitempty"`
 	UseFirstArtistOnly         bool   `json:"use_first_artist_only,omitempty"`
@@ -665,6 +666,7 @@ func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 		backend.AddToQueue(itemID, req.TrackName, req.ArtistName, req.AlbumName, req.SpotifyID)
 	}
 
+	backend.SetAllowLossyFallback(req.AllowLossyFallback)
 	backend.SetDownloading(true)
 	backend.StartDownloadItem(itemID)
 	defer backend.SetDownloading(false)
