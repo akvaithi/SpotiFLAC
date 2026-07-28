@@ -13,9 +13,8 @@
   <nav id="tabs">
     <button data-tab="get" class="active">Get</button>
     <button data-tab="queue">Queue <span id="queueCount" class="badge">0</span></button>
-    <button data-tab="files">Files</button>
+    <button data-tab="files">Library</button>
     <button data-tab="history">History</button>
-    <button data-tab="tools">Tools</button>
     <button data-tab="settings">Settings</button>
   </nav>
   <div class="conn"><span id="dot" class="dot"></span><span id="connText">connecting…</span></div>
@@ -77,13 +76,21 @@
     <div id="queueList"></div>
   </section>
 
-  <!-- FILES -->
+  <!-- LIBRARY / FILES -->
   <section id="tab-files" class="tab">
     <div class="card">
       <div class="row between">
-        <div class="path" id="filesPath"></div>
+        <div>
+          <b>Library (Navidrome folder)</b>
+          <div class="path" id="filesPath"></div>
+        </div>
         <button id="refreshFiles" class="small">Refresh</button>
       </div>
+      <div class="row between" style="margin-top:12px">
+        <div class="muted small" id="libStatus">Not scanned yet.</div>
+        <button id="scanLib" class="small primary">Scan for duplicates</button>
+      </div>
+      <p class="muted small">Scanning indexes your existing tracks (by ISRC + artist/title) so albums &amp; playlists you fetch will flag what's already here and skip it — no duplicate downloads.</p>
     </div>
     <div id="filesList"></div>
   </section>
@@ -97,36 +104,6 @@
       </div>
     </div>
     <div id="historyList"></div>
-  </section>
-
-  <!-- TOOLS -->
-  <section id="tab-tools" class="tab">
-    <div class="card">
-      <h3>Convert / Resample</h3>
-      <p class="muted">Pick a file in the Files tab (“Use in tools”), then choose an operation. Requires ffmpeg (bundled in the container).</p>
-      <div class="row"><input id="toolPath" type="text" placeholder="/downloads/…/track.flac"></div>
-      <div class="row opts">
-        <label>Convert to
-          <select id="convFormat">
-            <option value="mp3">MP3</option>
-            <option value="m4a-aac">M4A (AAC)</option>
-            <option value="m4a-alac">M4A (ALAC)</option>
-            <option value="wav">WAV</option>
-            <option value="opus">Opus</option>
-          </select>
-        </label>
-        <label>Bitrate <input id="convBitrate" type="text" value="320k" style="width:80px"></label>
-        <button id="convertBtn" class="small primary">Convert</button>
-      </div>
-      <div class="row opts">
-        <label>Resample rate
-          <select id="resRate"><option>44100</option><option>48000</option><option>88200</option><option>96000</option></select>
-        </label>
-        <label>Bit depth <select id="resDepth"><option>16</option><option>24</option></select></label>
-        <button id="resampleBtn" class="small primary">Resample</button>
-      </div>
-      <div id="toolsMsg" class="msg"></div>
-    </div>
   </section>
 
   <!-- SETTINGS -->

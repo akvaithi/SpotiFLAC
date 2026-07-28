@@ -328,6 +328,8 @@ func (a *App) startup() {
 	if err := backend.SanitizePersistedConfigSettings(); err != nil {
 		fmt.Printf("Failed to sanitize persisted config settings: %v\n", err)
 	}
+
+	library.load()
 }
 
 func (a *App) shutdown(ctx context.Context) {

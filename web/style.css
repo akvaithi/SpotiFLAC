@@ -71,6 +71,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .bar{height:4px;background:var(--panel2);border-radius:3px;overflow:hidden;margin-top:6px}
 .bar>span{display:block;height:100%;background:var(--accent);width:0}
 
+.track.in-lib{opacity:.55}
 .st.completed{color:var(--accent)} .st.failed{color:var(--danger)}
 .st.downloading{color:#e6c02a} .st.skipped{color:var(--muted)}
 

@@ -30,7 +30,7 @@ document.querySelectorAll('#tabs button').forEach(b => {
     document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     b.classList.add('active');
     document.getElementById('tab-' + b.dataset.tab).classList.add('active');
-    if (b.dataset.tab === 'files') loadFiles(state.filesCwd || state.server.download_dir);
+    if (b.dataset.tab === 'files') { loadFiles(state.filesCwd || state.server.download_dir); refreshLibStatus(); }
     if (b.dataset.tab === 'history') loadHistory();
     if (b.dataset.tab === 'queue') refreshQueue();
   };
@@ -51,6 +51,7 @@ function firstImage(s) { if (!s) return ''; const p = String(s).split(/\s+/).fil
   applySettingsToUI();
   connectEvents();
   checkApiStatus();
+  refreshLibStatus();
   $('filesPath').textContent = state.server.download_dir;
 })();
 
@@ -164,8 +165,10 @@ function renderMetadata(data) {
     const t = data.track;
     state.tracks = [t]; state.collection = null;
     el.innerHTML = `<div class="card">${trackRowHTML(t, false)}
+      <div id="dupeNote" class="muted small" style="margin-top:8px"></div>
       <div class="row" style="margin-top:12px"><button class="primary" id="dlOne">Download</button></div></div>`;
     $('dlOne').onclick = () => downloadTracks([t]);
+    markLibraryDuplicates();
     return;
   }
   // album or playlist
@@ -187,6 +190,7 @@ function renderMetadata(data) {
       <label class="checkbox"><input type="checkbox" id="selAll" checked> Select all</label>
       <button class="primary" id="dlSel">Download selected</button>
     </div>
+    <div id="dupeNote" class="muted small"></div>
     <div id="trackList"></div></div>`;
   el.innerHTML = html;
   const tl = $('trackList');
@@ -203,6 +207,7 @@ function renderMetadata(data) {
     const chosen = [...document.querySelectorAll('.sel:checked')].map(c => state.tracks[+c.dataset.i]);
     if (chosen.length) downloadTracks(chosen);
   };
+  markLibraryDuplicates();
 }
 
 function trackRowHTML(t, withCheckbox) {
@@ -355,9 +360,7 @@ async function loadFiles(dir) {
     } else {
       row.innerHTML = `<div class="nm">🎵 ${esc(f.name)}</div>
         <div class="sz">${fmtSize(f.size)}</div>
-        <a class="small" href="/api/file?path=${encodeURIComponent(f.path)}">download</a>
-        <button class="small">tools</button>`;
-      row.querySelector('button').onclick = () => { $('toolPath').value = f.path; switchTab('tools'); };
+        <a class="small" href="/api/file?path=${encodeURIComponent(f.path)}">download</a>`;
     }
     card.appendChild(row);
   });
@@ -384,33 +387,45 @@ async function loadHistory() {
 }
 $('clearHistory').onclick = () => rpc('ClearDownloadHistory').then(loadHistory);
 
-// ---------- tools ----------
-const CONV_MAP = {
-  'mp3': { output_format: 'mp3' },
-  'm4a-aac': { output_format: 'm4a', codec: 'aac' },
-  'm4a-alac': { output_format: 'm4a', codec: 'alac' },
-  'wav': { output_format: 'wav' },
-  'opus': { output_format: 'opus' },
-};
-$('convertBtn').onclick = async () => {
-  const p = $('toolPath').value.trim(); if (!p) return;
-  const msg = $('toolsMsg'); msg.className = 'msg'; msg.textContent = 'Converting…';
-  const map = CONV_MAP[$('convFormat').value] || { output_format: 'mp3' };
+// ---------- library dedup ----------
+async function refreshLibStatus() {
   try {
-    await rpc('ConvertAudio', { input_files: [p], output_format: map.output_format, codec: map.codec || '', bitrate: $('convBitrate').value });
-    msg.className = 'msg ok'; msg.textContent = 'Done.';
-    if (state.filesCwd) loadFiles(state.filesCwd);
-  } catch (e) { msg.className = 'msg err'; msg.textContent = e.message; }
+    const s = await rpc('GetLibraryStats');
+    const el = $('libStatus');
+    if (s.scanning) { el.textContent = 'Scanning library…'; setTimeout(refreshLibStatus, 1500); }
+    else if (s.error) { el.textContent = 'Scan error: ' + s.error; }
+    else if (s.scanned_at) {
+      el.textContent = `Indexed ${s.files} tracks (${s.isrcs} ISRCs) · last scan ${new Date(s.scanned_at).toLocaleString()}`;
+    } else { el.textContent = 'Not scanned yet — scan to enable duplicate detection.'; }
+    state.libIndexed = !!s.scanned_at && !s.scanning;
+  } catch {}
+}
+$('scanLib').onclick = async () => {
+  $('libStatus').textContent = 'Scanning library…';
+  try { await rpc('ScanLibrary', state.server.download_dir); setTimeout(refreshLibStatus, 800); }
+  catch (e) { $('libStatus').textContent = 'Error: ' + e.message; }
 };
-$('resampleBtn').onclick = async () => {
-  const p = $('toolPath').value.trim(); if (!p) return;
-  const msg = $('toolsMsg'); msg.className = 'msg'; msg.textContent = 'Resampling…';
-  try {
-    await rpc('ResampleAudio', { input_files: [p], sample_rate: $('resRate').value, bit_depth: $('resDepth').value });
-    msg.className = 'msg ok'; msg.textContent = 'Done.';
-    if (state.filesCwd) loadFiles(state.filesCwd);
-  } catch (e) { msg.className = 'msg err'; msg.textContent = e.message; }
-};
+
+// Given the fetched track list, mark which are already in the library.
+async function markLibraryDuplicates() {
+  if (!state.tracks || !state.tracks.length) return;
+  const items = state.tracks.map((t, i) => ({ index: i, isrc: t.isrc || '', title: t.name || '', artist: t.artists || '' }));
+  let res;
+  try { res = await rpc('MatchLibrary', items); } catch { return; }
+  let dupes = 0;
+  (res || []).forEach(r => {
+    if (!r.in_library) return;
+    dupes++;
+    const cb = document.querySelector(`.sel[data-i="${r.index}"]`);
+    if (cb) cb.checked = false;
+    const st = $('st-' + r.index);
+    if (st) { st.textContent = '✓ in library'; st.className = 'st skipped'; }
+    const row = cb ? cb.closest('.track') : null;
+    if (row) row.classList.add('in-lib');
+  });
+  const note = $('dupeNote');
+  if (note) note.textContent = dupes ? `${dupes} track(s) already in your library were unchecked.` : '';
+}
 
 // ---------- settings ----------
 function applySettingsToUI() {
