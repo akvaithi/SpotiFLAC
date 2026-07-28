@@ -59,18 +59,26 @@ own reverse-proxy auth / VPN if you expose it.
 
 ## How the Cloudflare verification works
 
-The community servers occasionally require a Cloudflare check. On the desktop
-app this opens your local browser and redirects to a `localhost` callback — which
-can't work in a container. This build bridges it without changing the engine:
+The community servers occasionally require a Cloudflare check. Its callback is
+strictly validated to be a `127.0.0.1/session-grant` loopback address, so a
+remote/headless deployment can't have it redirect straight back to the app.
+Instead the web UI walks you through a quick capture step:
 
 1. When a download needs verification, the UI pops a **"Verification required"**
    modal (pushed over Server-Sent Events).
-2. You click **Open verification page** — it opens the Cloudflare challenge in a
-   **new browser tab on your own device**.
-3. The challenge redirects back to the app's own `/verify/callback`, which relays
-   the grant to the engine's loopback listener inside the container.
-4. The engine exchanges it for an HMAC session (cached in `/config`) and the
-   download continues. Subsequent downloads reuse the session — no re-verifying.
+2. Click **Open verification page** — the real Cloudflare challenge opens in a new
+   tab and you complete it.
+3. Your browser then tries to redirect to `http://127.0.0.1:…/session-grant?…&grant=…`
+   and shows a **"can't connect"** page — that's expected. **Copy that page's full
+   address** and paste it into the modal, then **Submit**.
+4. The server extracts the grant and relays it to the engine's loopback listener
+   *inside the container*, which exchanges it for an HMAC session (cached in
+   `/config`). The download continues, and subsequent downloads reuse the session
+   until it expires — so you only do this occasionally.
+
+> Tip: if you run the container locally and browse it at `http://localhost:PORT`,
+> the redirect can reach the app directly; the paste step is mainly for remote
+> (LAN/ZimaOS) access where `127.0.0.1` in your browser isn't the container.
 
 ## What the UI covers
 

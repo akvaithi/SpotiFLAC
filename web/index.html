@@ -158,11 +158,20 @@
 <div id="verifyModal" class="modal-backdrop">
   <div class="modal">
     <h2>Verification required</h2>
-    <p>The community servers need a quick Cloudflare check. Open the verification page in a new tab, complete it, then return here — your download continues automatically.</p>
+    <ol class="verify-steps">
+      <li><b>Open</b> the verification page and complete the Cloudflare check.</li>
+      <li>Your browser will then land on a page that <b>won't load</b> (address starts with <code>http://127.0.0.1…</code>). That's expected.</li>
+      <li><b>Copy that page's full web address</b> and paste it below, then Submit.</li>
+    </ol>
     <div class="row center">
-      <button id="verifyOpen" class="primary">Open verification page</button>
+      <button id="verifyOpen" class="primary">1 · Open verification page</button>
     </div>
-    <p class="muted small" id="verifyStatus">Waiting…</p>
+    <textarea id="verifyPaste" rows="2" placeholder="Paste the http://127.0.0.1:…/session-grant?…&grant=… address here"></textarea>
+    <div class="row center">
+      <button id="verifySubmit" class="primary">2 · Submit</button>
+      <button id="verifyCancel" class="small">Cancel</button>
+    </div>
+    <p class="muted small" id="verifyStatus"></p>
   </div>
 </div>
 

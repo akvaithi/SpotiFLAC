@@ -1,50 +1,45 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
 
-// Verification proxy bridge.
+// Verification bridge.
 //
-// Upstream SpotiFLAC solves the community Cloudflare challenge by opening the
-// challenge URL in a local browser; the challenge page then redirects to a
-// loopback callback (http://127.0.0.1:<port>/session-grant) that the desktop
-// app is listening on. In a headless container the user's browser is on a
-// different host and cannot reach that loopback address.
+// The community verify service issues a Cloudflare challenge whose callback
+// ("cb") is STRICTLY validated: it must be a loopback host (127.0.0.1 or
+// localhost) with the exact path /session-grant. It rejects any other host or
+// path (e.g. a LAN IP, or /verify/callback) with an error page. So we cannot
+// point the callback at this web app.
 //
-// This bridge keeps the backend completely unchanged. When the backend asks us
-// to "open the browser", we:
-//  1. take the challenge URL it hands us (which embeds cb=<loopback callback>),
-//  2. stash that loopback callback under a random token,
-//  3. rewrite cb to point at THIS server's /verify/callback?token=... ,
-//  4. publish the rewritten challenge URL to the web UI (which opens it in a
-//     new browser tab on the user's device).
+// Instead we keep the backend's real loopback callback unchanged (the service
+// accepts it and renders the Turnstile checkbox). The user solves the challenge
+// in their browser; the challenge then redirects the browser to that loopback
+// URL — which is unreachable from a remote browser, so the browser shows a
+// "can't connect" page whose address bar contains ...&grant=<grant>.
 //
-// When the user finishes the Cloudflare challenge, their browser is redirected
-// to /verify/callback?token=...&grant=... . We then relay that grant to the
-// backend's loopback listener (reachable from inside the container), which
-// completes the session exchange exactly as on desktop.
+// The user pastes that address back into the web UI. We extract the grant and
+// relay it to the backend's loopback listener from INSIDE the container (where
+// 127.0.0.1 is reachable), completing the exact same exchange as on desktop.
 
 type verifyBridge struct {
-	mu       sync.Mutex
-	loopback map[string]string // token -> loopback callback URL
-	pending  string            // current rewritten challenge URL (for late SSE subscribers)
+	mu         sync.Mutex
+	loopbackCB string // backend's real loopback callback (with its state)
+	pending    string // challenge URL currently shown to the user
 }
 
-var bridge = &verifyBridge{loopback: make(map[string]string)}
+var bridge = &verifyBridge{}
 
-// publicBaseURL is derived per-request from the Host header, but the backend's
-// openBrowser callback has no request context, so we capture the most recent
-// base URL seen by an incoming HTTP request. Defaults are overridden in main.
+// setPublicBase is retained for compatibility with main.go's middleware but is
+// no longer used to build callbacks (the callback must stay loopback).
 var (
 	publicBaseMu sync.RWMutex
-	publicBase   = ""
+	publicBase   string
 )
 
 func setPublicBase(u string) {
@@ -55,58 +50,19 @@ func setPublicBase(u string) {
 	publicBaseMu.Unlock()
 }
 
-func currentPublicBase() string {
-	publicBaseMu.RLock()
-	defer publicBaseMu.RUnlock()
-	return publicBase
-}
-
-func randToken() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
 // webOpenBrowser is registered with backend.SetCommunityVerificationHandlers.
 // It runs on the backend's verification goroutine and must not block.
 func webOpenBrowser(challengeURL string) {
-	u, err := url.Parse(challengeURL)
-	if err != nil {
-		// Fall back to surfacing the raw URL so the user can still solve it.
-		bridge.setPending(challengeURL)
-		emitEvent("verification-required", map[string]string{"challenge_url": challengeURL})
-		return
+	loopbackCB := ""
+	if u, err := url.Parse(challengeURL); err == nil {
+		loopbackCB = u.Query().Get("cb")
 	}
-
-	q := u.Query()
-	loopbackCB := q.Get("cb")
-
-	base := currentPublicBase()
-	if loopbackCB == "" || base == "" {
-		// Without a loopback cb or a known public address we cannot proxy;
-		// surface the original URL unchanged.
-		bridge.setPending(challengeURL)
-		emitEvent("verification-required", map[string]string{"challenge_url": challengeURL})
-		return
-	}
-
-	token := randToken()
 	bridge.mu.Lock()
-	bridge.loopback[token] = loopbackCB
+	bridge.loopbackCB = loopbackCB
+	bridge.pending = challengeURL
 	bridge.mu.Unlock()
 
-	q.Set("cb", base+"/verify/callback?token="+token)
-	u.RawQuery = q.Encode()
-	rewritten := u.String()
-
-	bridge.setPending(rewritten)
-	emitEvent("verification-required", map[string]string{"challenge_url": rewritten})
-}
-
-func (b *verifyBridge) setPending(v string) {
-	b.mu.Lock()
-	b.pending = v
-	b.mu.Unlock()
+	emitEvent("verification-required", map[string]string{"challenge_url": challengeURL})
 }
 
 func getPendingVerification() string {
@@ -115,49 +71,123 @@ func getPendingVerification() string {
 	return bridge.pending
 }
 
-// handleVerifyCallback receives the user's browser after they solve the
-// Cloudflare challenge, relays the grant to the backend's loopback listener,
-// then shows a "Verified" page that auto-closes the tab.
-func handleVerifyCallback(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-	grant := r.URL.Query().Get("grant")
+// handleVerifyComplete receives the grant the user captured after solving the
+// challenge and relays it to the backend's loopback listener.
+//
+//	POST /api/verify/complete   body: {"value": "<pasted URL or bare grant>"}
+func handleVerifyComplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "use POST")
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	value := extractJSONValue(string(body))
+	grant := extractGrant(value)
+	if grant == "" {
+		writeErr(w, http.StatusBadRequest, "could not find a grant in the pasted value")
+		return
+	}
 
 	bridge.mu.Lock()
-	loopbackCB := bridge.loopback[token]
-	delete(bridge.loopback, token)
-	bridge.pending = ""
+	cb := bridge.loopbackCB
 	bridge.mu.Unlock()
-
-	if loopbackCB == "" || grant == "" {
-		http.Error(w, "invalid or expired verification callback", http.StatusBadRequest)
+	if cb == "" {
+		writeErr(w, http.StatusBadRequest, "no verification is in progress")
 		return
 	}
 
-	relayURL, err := url.Parse(loopbackCB)
-	if err != nil {
-		http.Error(w, "invalid loopback callback", http.StatusBadRequest)
+	relay, err := url.Parse(cb)
+	if err != nil || !isLoopbackHost(relay.Host) || relay.Path != "/session-grant" {
+		writeErr(w, http.StatusBadRequest, "invalid loopback callback")
 		return
 	}
-	rq := relayURL.Query()
-	rq.Set("grant", grant)
-	relayURL.RawQuery = rq.Encode()
+	q := relay.Query()
+	q.Set("grant", grant)
+	relay.RawQuery = q.Encode()
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, relayErr := client.Get(relayURL.String())
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, relayErr := client.Get(relay.String())
+	ok := false
 	if relayErr == nil {
+		ok = resp.StatusCode == http.StatusOK
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 		resp.Body.Close()
 	}
 
-	emitEvent("verification-complete", map[string]bool{"ok": relayErr == nil})
+	bridge.mu.Lock()
+	bridge.pending = ""
+	bridge.mu.Unlock()
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = io.WriteString(w, verifiedPageHTML)
+	emitEvent("verification-complete", map[string]bool{"ok": ok})
+	if !ok {
+		msg := "relay failed"
+		if relayErr != nil {
+			msg = relayErr.Error()
+		}
+		writeErr(w, http.StatusBadGateway, msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-const verifiedPageHTML = `<!doctype html><html><head><meta charset="utf-8">` +
-	`<meta name="viewport" content="width=device-width,initial-scale=1"><title>Verified</title>` +
-	`<style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:#000;background-image:radial-gradient(circle,rgba(255,255,255,.2) 1.5px,transparent 1.5px);background-size:30px 30px;color:#f5f5f5;font:14px/1.5 system-ui,sans-serif}main{text-align:center}.icon{width:48px;height:48px;margin:0 auto 20px;display:grid;place-items:center;border-radius:50%;background:#fff;color:#000;font-size:22px}h1{margin:0 0 6px;font-size:24px;letter-spacing:-.035em}p{margin:0;color:#888}</style></head>` +
-	`<body><main><div class="icon">&#10003;</div><h1>Verified</h1><p>You can close this tab and return to SpotiFLAC.</p></main>` +
-	`<script>setTimeout(()=>window.close(),1200)</script></body></html>`
+// extractJSONValue pulls the "value" field out of a small JSON body without a
+// struct, tolerating a bare string body too.
+func extractJSONValue(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	// crude but dependency-free: look for "value"
+	if i := strings.Index(body, "\"value\""); i >= 0 {
+		rest := body[i+len("\"value\""):]
+		if c := strings.Index(rest, ":"); c >= 0 {
+			rest = strings.TrimSpace(rest[c+1:])
+			if strings.HasPrefix(rest, "\"") {
+				rest = rest[1:]
+				if e := strings.Index(rest, "\""); e >= 0 {
+					return unescapeJSON(rest[:e])
+				}
+			}
+		}
+	}
+	return strings.Trim(body, "\"")
+}
+
+func unescapeJSON(s string) string {
+	s = strings.ReplaceAll(s, "\\/", "/")
+	s = strings.ReplaceAll(s, "\\u0026", "&")
+	s = strings.ReplaceAll(s, "\\\"", "\"")
+	return s
+}
+
+// extractGrant accepts a full pasted URL (…?state=…&grant=XYZ) or a bare grant.
+func extractGrant(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if u, err := url.Parse(value); err == nil && u.Query().Get("grant") != "" {
+		return u.Query().Get("grant")
+	}
+	// maybe they pasted just the query string
+	if strings.Contains(value, "grant=") {
+		if vals, err := url.ParseQuery(strings.TrimLeft(value, "?")); err == nil {
+			if g := vals.Get("grant"); g != "" {
+				return g
+			}
+		}
+	}
+	// otherwise treat the whole thing as the grant token
+	if !strings.Contains(value, "://") && !strings.Contains(value, "=") {
+		return value
+	}
+	return ""
+}
+
+func isLoopbackHost(host string) bool {
+	h := host
+	if i := strings.LastIndex(h, ":"); i >= 0 {
+		h = h[:i]
+	}
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
+}

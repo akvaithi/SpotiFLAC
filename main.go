@@ -67,7 +67,7 @@ func main() {
 	mux.HandleFunc("/api/events", handleEvents)
 	mux.HandleFunc("/api/server-info", handleServerInfo)
 	mux.HandleFunc("/api/file", handleFileDownload)
-	mux.HandleFunc("/verify/callback", withPublicBase(handleVerifyCallback))
+	mux.HandleFunc("/api/verify/complete", handleVerifyComplete)
 	mux.Handle("/", staticHandler())
 
 	srv := &http.Server{

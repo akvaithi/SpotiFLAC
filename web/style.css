@@ -84,6 +84,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .modal{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:24px;max-width:420px;text-align:center}
 .modal h2{margin:0 0 10px}
 .modal p{color:var(--muted);font-size:13px}
+.modal textarea{width:100%;margin:12px 0;background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px;font-size:12px;resize:vertical}
+.verify-steps{text-align:left;color:var(--muted);font-size:13px;padding-left:20px;margin:0 0 14px}
+.verify-steps li{margin-bottom:6px}
+.verify-steps code{font-size:11px}
 
 @media (max-width:600px){
   nav#tabs{order:3;width:100%} .conn{order:2}

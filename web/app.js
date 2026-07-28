@@ -84,11 +84,30 @@ function handleEvent(name, data) {
 let pendingChallenge = null;
 function showVerify(url) {
   pendingChallenge = url;
-  $('verifyStatus').textContent = 'Waiting for you to complete verification…';
+  $('verifyStatus').textContent = '';
+  $('verifyPaste').value = '';
   $('verifyModal').classList.add('show');
 }
 function hideVerify() { $('verifyModal').classList.remove('show'); pendingChallenge = null; }
 $('verifyOpen').onclick = () => { if (pendingChallenge) window.open(pendingChallenge, '_blank'); };
+$('verifyCancel').onclick = hideVerify;
+$('verifySubmit').onclick = async () => {
+  const value = $('verifyPaste').value.trim();
+  if (!value) { $('verifyStatus').textContent = 'Paste the address first.'; return; }
+  $('verifyStatus').textContent = 'Submitting…';
+  try {
+    const res = await fetch('/api/verify/complete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    $('verifyStatus').textContent = 'Verified! Your download will continue.';
+    setTimeout(hideVerify, 1200);
+  } catch (e) {
+    $('verifyStatus').textContent = 'Failed: ' + e.message;
+  }
+};
 
 // ---------- fetch metadata ----------
 $('mode').onchange = () => {
