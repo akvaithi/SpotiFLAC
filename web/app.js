@@ -229,28 +229,51 @@ function buildRequest(t) {
     embed_lyrics: !!s.embedLyrics,
     save_cover: !!s.saveCover,
     allow_fallback: s.allowFallback !== false,
+    tidal_api_url: s.tidalApiUrl || '',
+    qobuz_api_url: s.qobuzApiUrl || '',
   };
 }
 
+let downloadAbort = null;
 async function downloadTracks(tracks) {
-  if (state.downloading) { alert('A download is already running. Check the Queue tab.'); return; }
+  if (state.downloading) {
+    if (!confirm('A download is already running. Stop it and start this one?')) return;
+    await stopDownloads();
+  }
   state.downloading = true;
+  downloadAbort = new AbortController();
   switchTab('queue');
   const poll = setInterval(refreshQueue, 700);
-  for (let i = 0; i < tracks.length; i++) {
-    const req = buildRequest(tracks[i]);
-    setStatus(i, 'downloading');
-    try {
-      const resp = await rpc('DownloadTrack', req);
-      setStatus(i, resp && resp.success ? 'completed' : (resp && resp.already_exists ? 'skipped' : 'failed'));
-    } catch (e) {
-      setStatus(i, 'failed');
-      console.error('download failed', e);
+  try {
+    for (let i = 0; i < tracks.length; i++) {
+      const req = buildRequest(tracks[i]);
+      setStatus(i, 'downloading');
+      try {
+        const res = await fetch('/api/rpc/DownloadTrack', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify([req]), signal: downloadAbort.signal,
+        });
+        const resp = await res.json().catch(() => ({}));
+        if (!res.ok) { setStatus(i, 'failed'); console.error('download error', resp.error); }
+        else setStatus(i, resp.success ? 'completed' : (resp.already_exists ? 'skipped' : 'failed'));
+      } catch (e) {
+        if (e.name === 'AbortError') { setStatus(i, 'skipped'); break; }
+        setStatus(i, 'failed'); console.error('download failed', e);
+      }
     }
+  } finally {
+    clearInterval(poll);
+    state.downloading = false;
+    downloadAbort = null;
+    refreshQueue();
   }
-  clearInterval(poll);
-  refreshQueue();
+}
+
+async function stopDownloads() {
+  if (downloadAbort) { try { downloadAbort.abort(); } catch {} }
+  try { await rpc('ForceStopDownloads'); } catch {}
   state.downloading = false;
+  refreshQueue();
 }
 
 function setStatus(i, s) { const el = $('st-' + i); if (el) { el.textContent = s; el.className = 'st ' + s; } }
@@ -264,11 +287,18 @@ async function refreshQueue() {
   const items = (q && q.queue) || [];
   $('queueCount').textContent = items.filter(x => x.status === 'queued' || x.status === 'downloading').length;
   const sum = $('progressSummary');
+  const banner = $('rateBanner');
+  if (prog && (prog.rate_limited || prog.cooldown)) {
+    let b = '';
+    if (prog.cooldown) b = `⏳ Community server on cooldown — retrying in ~${Math.ceil((prog.cooldown_secs || 0) / 60)} min${prog.cooldown_message ? ' (' + prog.cooldown_message + ')' : ''}`;
+    else b = `⏳ Rate-limited by community server — retrying in ${prog.rate_limit_secs}s`;
+    banner.textContent = b + '. This is their throttling, not a hang — it will resume automatically, or set up your own gateway in Settings.';
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
   if (prog && prog.is_downloading) {
-    let s = `Downloading — ${prog.mb_downloaded.toFixed(1)} MB @ ${prog.speed_mbps.toFixed(2)} MB/s`;
-    if (prog.rate_limited) s += ` · rate-limited ${prog.rate_limit_secs}s`;
-    if (prog.cooldown) s += ` · cooldown ${prog.cooldown_secs}s`;
-    sum.textContent = s;
+    sum.textContent = `Downloading — ${prog.mb_downloaded.toFixed(1)} MB @ ${prog.speed_mbps.toFixed(2)} MB/s`;
   } else {
     sum.textContent = `${q ? (q.completed_count || 0) : 0} done · ${q ? (q.failed_count || 0) : 0} failed`;
   }
@@ -285,7 +315,7 @@ async function refreshQueue() {
     list.appendChild(div);
   });
 }
-$('stopBtn').onclick = () => rpc('ForceStopDownloads').then(refreshQueue);
+$('stopBtn').onclick = stopDownloads;
 $('clearDoneBtn').onclick = () => rpc('ClearCompletedDownloads').then(refreshQueue);
 $('clearAllBtn').onclick = () => rpc('ClearAllDownloads').then(refreshQueue);
 
@@ -383,8 +413,34 @@ function applySettingsToUI() {
   $('setEmbedLyrics').checked = !!s.embedLyrics;
   $('setSaveCover').checked = !!s.saveCover;
   $('setFallback').checked = s.allowFallback !== false;
+  $('setTidalApi').value = s.tidalApiUrl || '';
+  $('setQobuzApi').value = s.qobuzApiUrl || '';
   if (s.service) $('service').value = s.service;
 }
+
+$('saveApis').onclick = async () => {
+  const s = Object.assign({}, state.settings, {
+    tidalApiUrl: $('setTidalApi').value.trim(),
+    qobuzApiUrl: $('setQobuzApi').value.trim(),
+  });
+  const msg = $('apisMsg'); msg.className = 'msg';
+  try { await rpc('SaveSettings', s); state.settings = s; msg.className = 'msg ok'; msg.textContent = 'Saved.'; }
+  catch (e) { msg.className = 'msg err'; msg.textContent = e.message; }
+};
+$('testTidal').onclick = async () => {
+  const url = $('setTidalApi').value.trim(); const m = $('tidalApiMsg');
+  if (!url) { m.textContent = 'Enter a URL first.'; return; }
+  m.textContent = 'Testing…';
+  try { const ok = await rpc('CheckCustomTidalAPI', url); m.textContent = ok ? '✅ online (returns a FULL manifest)' : '❌ not responding correctly'; }
+  catch (e) { m.textContent = '❌ ' + e.message; }
+};
+$('testQobuz').onclick = async () => {
+  const url = $('setQobuzApi').value.trim(); const m = $('qobuzApiMsg');
+  if (!url) { m.textContent = 'Enter a URL first.'; return; }
+  m.textContent = 'Testing…';
+  try { const ok = await rpc('CheckCustomQobuzAPI', url); m.textContent = ok ? '✅ online (returns a download URL)' : '❌ not responding correctly'; }
+  catch (e) { m.textContent = '❌ ' + e.message; }
+};
 $('saveSettings').onclick = async () => {
   const s = Object.assign({}, state.settings, {
     downloadPath: $('setDownloadPath').value.trim(),

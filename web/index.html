@@ -62,6 +62,7 @@
 
   <!-- QUEUE -->
   <section id="tab-queue" class="tab">
+    <div id="rateBanner" class="banner" style="display:none"></div>
     <div class="card">
       <div class="row between">
         <div class="progress-summary" id="progressSummary">Idle</div>
@@ -145,6 +146,19 @@
       <label class="checkbox"><input id="setSaveCover" type="checkbox"> Save cover art file</label>
       <label class="checkbox"><input id="setFallback" type="checkbox" checked> Allow fallback to other quality</label>
       <div class="row"><button id="saveSettings" class="primary">Save settings</button><span id="settingsMsg" class="msg"></span></div>
+    </div>
+    <div class="card">
+      <h3>Your own gateway (bypass community servers)</h3>
+      <p class="muted small">Point the app at your own Tidal/Qobuz API gateway to skip the shared community servers, their Cloudflare check, and their rate limits entirely. Leave blank to use the community servers.</p>
+      <label class="field">Custom Tidal API URL
+        <div class="row"><input id="setTidalApi" type="text" placeholder="https://tidal.mygateway.lan" style="flex:1"><button id="testTidal" class="small">Test</button></div>
+        <small class="muted" id="tidalApiMsg"></small>
+      </label>
+      <label class="field">Custom Qobuz API URL
+        <div class="row"><input id="setQobuzApi" type="text" placeholder="https://qobuz.mygateway.lan" style="flex:1"><button id="testQobuz" class="small">Test</button></div>
+        <small class="muted" id="qobuzApiMsg"></small>
+      </label>
+      <div class="row"><button id="saveApis" class="primary">Save gateway URLs</button><span id="apisMsg" class="msg"></span></div>
     </div>
     <div class="card">
       <h3>Community API status</h3>

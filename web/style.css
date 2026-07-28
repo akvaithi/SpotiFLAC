@@ -51,6 +51,7 @@ button.danger{background:var(--danger);color:#fff;border:0}
 button.danger.small{background:transparent;border:1px solid var(--danger);color:var(--danger)}
 button:disabled{opacity:.5;cursor:not-allowed}
 
+.banner{background:#3a2e0a;border:1px solid #6b5410;color:#f0d97a;border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:13px}
 .msg{font-size:13px;margin:8px 0;min-height:18px}
 .msg.err{color:var(--danger)} .msg.ok{color:var(--accent)}
 .muted{color:var(--muted)} .small{font-size:12px}
