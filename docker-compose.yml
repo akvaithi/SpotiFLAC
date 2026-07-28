@@ -1,8 +1,8 @@
 services:
   spotiflac:
-    build: .
-    # Or use a prebuilt image you push to a registry:
-    # image: ghcr.io/youruser/spotiflac-web:latest
+    image: ghcr.io/akvaithi/spotiflac:latest
+    # To build locally instead of pulling, comment the image line and use:
+    # build: .
     container_name: spotiflac
     ports:
       - "8080:8080"
