@@ -211,7 +211,9 @@ func finalizeTidalDownload(outputFilename, spotifyTrackName, spotifyArtistName, 
 
 func NewTidalDownloader(apiURL string) *TidalDownloader {
 	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if !strings.HasPrefix(apiURL, "https://") {
+	// Allow http:// too, so a self-hosted gateway on a LAN/Docker network
+	// (which typically has no TLS) is honored instead of silently ignored.
+	if !strings.HasPrefix(apiURL, "https://") && !strings.HasPrefix(apiURL, "http://") {
 		apiURL = ""
 	}
 	return &TidalDownloader{

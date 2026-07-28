@@ -843,7 +843,8 @@ func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 			isrc = <-isrcChan
 		}
 		downloader := backend.NewQobuzDownloader()
-		if strings.HasPrefix(strings.TrimRight(strings.TrimSpace(req.QobuzAPIURL), "/"), "https://") {
+		qobuzAPI := strings.TrimRight(strings.TrimSpace(req.QobuzAPIURL), "/")
+		if strings.HasPrefix(qobuzAPI, "https://") || strings.HasPrefix(qobuzAPI, "http://") {
 			downloader.SetCustomAPIURL(req.QobuzAPIURL)
 		}
 		quality := req.AudioFormat
@@ -1418,7 +1419,7 @@ func (a *App) CheckCustomTidalAPI(apiURL string) bool {
 
 func (a *App) CheckCustomQobuzAPI(apiURL string) bool {
 	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if !strings.HasPrefix(apiURL, "https://") {
+	if !strings.HasPrefix(apiURL, "https://") && !strings.HasPrefix(apiURL, "http://") {
 		return false
 	}
 

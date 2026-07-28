@@ -22,7 +22,8 @@ type QobuzDownloader struct {
 
 func (q *QobuzDownloader) SetCustomAPIURL(apiURL string) {
 	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if !strings.HasPrefix(apiURL, "https://") {
+	// Allow http:// too for self-hosted LAN/Docker gateways without TLS.
+	if !strings.HasPrefix(apiURL, "https://") && !strings.HasPrefix(apiURL, "http://") {
 		apiURL = ""
 	}
 	q.customURL = apiURL
