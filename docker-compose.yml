@@ -1,8 +1,6 @@
 services:
   spotiflac:
     image: ghcr.io/akvaithi/spotiflac:latest
-    # To build locally instead of pulling, comment the image line and use:
-    # build: .
     container_name: spotiflac
     ports:
       - "8080:8080"
@@ -14,7 +12,16 @@ services:
       - ADDR=:8080
       - DOWNLOAD_DIR=/downloads
       - CONFIG_DIR=/config
-      # Optional: if behind a reverse proxy, set the externally-visible URL so
-      # the Cloudflare verification callback resolves correctly.
-      # - PUBLIC_URL=https://spotiflac.example.com
+    restart: unless-stopped
+
+  # Optional: your own Tidal gateway so downloads use YOUR subscription instead
+  # of the shared community servers (no rate limits / Cloudflare). Remove this
+  # block if you don't want it. Requires a one-time login (see SETUP.md).
+  tidal-gateway:
+    image: ghcr.io/akvaithi/tidal-gateway:latest
+    container_name: tidal-gateway
+    ports:
+      - "8081:8081"
+    volumes:
+      - /DATA/AppData/tidal-gateway:/config
     restart: unless-stopped

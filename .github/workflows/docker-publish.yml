@@ -1,4 +1,4 @@
-name: Build and publish container image
+name: Build and publish container images
 
 on:
   push:
@@ -11,6 +11,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - image: spotiflac
+            context: .
+          - image: tidal-gateway
+            context: ./tidal-gateway
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,13 +32,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push (linux/amd64)
+      - name: Build and push ${{ matrix.image }} (linux/amd64)
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context }}
           platforms: linux/amd64
           push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/spotiflac:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
