@@ -72,18 +72,19 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
     and an optional `API_TOKEN` (off by default) for the previously wide-open API.
 
 ## Pending / not yet deployed
-- **The Navidrome rescan hook is deployed but not configured.** `GetNavidromeStatus`
-  reports `configured:false`, so downloads land but nothing pokes Navidrome — it
-  waits for its own file watcher. To finish: add the login to the Keychain
-  (`security add-generic-password -s navidrome -a <user> -w '<pw>' -T /usr/bin/security -U`),
-  then write `navidromeUrl` (`http://172.17.0.1:4533` — docker0 host gateway, *not*
-  a container IP), `navidromeUser`, `navidromePassword` into
-  `/DATA/AppData/spotiflac/config/.spotiflac/config.json` and restart the container.
-  Verify with `GetNavidromeStatus` → `{configured:true, reachable:true}`.
-- Everything else is deployed and verified on 2026-07-28 (second deploy): durable
-  queue answering, `GetRelatedArtists` returning live Spotify data, and a real
-  end-to-end enqueue → 29.66 MB FLAC at `/DATA/Media/Music/` in 5 s. Saved gateway
-  URL re-checked and still `http://172.17.0.1:8081`.
+- Nothing. Deployed and fully verified on 2026-07-28 (second deploy): durable queue
+  answering, `GetRelatedArtists` returning live Spotify data, and the **whole
+  acquisition loop proven end to end** — Navidrome searched for a track it didn't
+  have (0 hits) → `EnqueueDownloads` → 29.7 MB FLAC → worker auto-triggered
+  `/rest/startScan` → same search returned it as FLAC 1111 kbps with a real
+  Navidrome id, library count 740 → 741. Saved gateway URL re-checked and still
+  `http://172.17.0.1:8081`.
+- **Navidrome credentials are configured** in
+  `/DATA/AppData/spotiflac/config/.spotiflac/config.json` (`navidromeUrl` =
+  `http://172.17.0.1:4533` — docker0 host gateway, *not* a container IP —
+  plus `navidromeUser` / `navidromePassword`; the password is also in the operator's
+  Keychain under service `navidrome`). `loadNavidromeConfig` re-reads the file on
+  every call, so changing these needs **no container restart**.
 - The pre-v2 library index on the server was discarded by design — **the user needs
   to hit "Scan library" once** to rebuild it.
 
