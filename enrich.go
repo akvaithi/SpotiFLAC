@@ -499,11 +499,8 @@ func backendSearch(ctx context.Context, query, kind string) []backend.SearchResu
 // rest of the codebase relies on.
 func firstImage(results []backend.SearchResult) string {
 	for _, result := range results {
-		for _, candidate := range strings.Split(result.Images, ",") {
-			candidate = strings.TrimSpace(candidate)
-			if strings.HasPrefix(candidate, "http") {
-				return candidate
-			}
+		if url := firstImageURL(result.Images); url != "" {
+			return url
 		}
 	}
 	return ""
@@ -525,4 +522,73 @@ func downloadImage(client *http.Client, url string) []byte {
 		return nil
 	}
 	return image
+}
+
+// resolveCoverURLFromSpotifyID recovers artwork for a download request that
+// arrived without any.
+//
+// Kept beside the enrichment code because it exists for the same reason and uses
+// the same source: the Spotify catalogue these files all came from. Failure is
+// silent and non-fatal — a track downloading without art is worse than one with,
+// but far better than one that doesn't download.
+func resolveCoverURLFromSpotifyID(spotifyID string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	raw, err := backend.GetFilteredSpotifyData(
+		ctx,
+		"https://open.spotify.com/track/"+spotifyID,
+		false,
+		time.Second/20,
+		", ",
+		nil,
+	)
+	if err != nil {
+		return ""
+	}
+
+	// The track path answers with an album-shaped payload whose tracklist carries
+	// the images, so reach through whichever shape came back rather than assuming.
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		AlbumInfo struct {
+			Images string `json:"images"`
+		} `json:"album_info"`
+		TrackList []struct {
+			Images string `json:"images"`
+		} `json:"track_list"`
+		Track struct {
+			Images string `json:"images"`
+		} `json:"track"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return ""
+	}
+
+	for _, candidate := range []string{payload.AlbumInfo.Images, payload.Track.Images} {
+		if url := firstImageURL(candidate); url != "" {
+			return url
+		}
+	}
+	for _, track := range payload.TrackList {
+		if url := firstImageURL(track.Images); url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
+// firstImageURL takes the largest image from the comma-joined list the metadata
+// layer produces.
+func firstImageURL(images string) string {
+	for _, candidate := range strings.Split(images, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if strings.HasPrefix(candidate, "http") {
+			return candidate
+		}
+	}
+	return ""
 }

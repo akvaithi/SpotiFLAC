@@ -625,6 +625,20 @@ func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 		req.Service = "tidal"
 	}
 
+	// Fill in artwork the caller didn't supply.
+	//
+	// A client that enqueues from a Spotify *listening-history export* has a track
+	// id but no image URL — the export doesn't contain one — so `cover_url` arrived
+	// empty and nothing was embedded. That silently produced a library where roughly
+	// half the files had no artwork and Navidrome served its own placeholder for
+	// them. The track id is enough to recover it, so resolve it here rather than
+	// requiring every caller to remember.
+	if req.CoverURL == "" && req.SpotifyID != "" {
+		if cover := resolveCoverURLFromSpotifyID(req.SpotifyID); cover != "" {
+			req.CoverURL = cover
+		}
+	}
+
 	if req.OutputDir == "" {
 		req.OutputDir = "."
 	} else {
