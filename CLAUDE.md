@@ -91,7 +91,7 @@ gotcha below) — recreating containers silently invalidates it.
   `backend/tidal.go`, which is the main Tidal route and bypasses `ProgressWriter`
   entirely — it calls `UpdateItemProgress` directly and extrapolates the total from
   the segments fetched so far.
-- **Library enrichment** (`enrich.go`): `EnrichLibrary({lyrics,genres,limit,overwrite})`
+- **Library enrichment** (`enrich.go`): `EnrichLibrary({lyrics,genres,covers,limit,overwrite})`
   starts a background pass that writes **synced lyrics (LRCLIB)** and **genres
   (MusicBrainz)** into the files themselves, then triggers a Navidrome rescan.
   `GetEnrichStatus` / `StopEnrich` manage it; progress rides the SSE hub as
@@ -102,6 +102,14 @@ gotcha below) — recreating containers silently invalidates it.
   MusicBrainz match below score 90 or with a non-exact name is discarded; and
   genres are ranked by tag vote count, not API order. Rate limits are deliberate —
   1.1s for MusicBrainz as they ask, with per-artist caching.
+  **Covers** were added 2026-07-29 and are the same shape: skip files that already
+  carry a picture, cache per `artist|album` so an album costs one lookup, source from
+  Spotify because every file here was acquired from a Spotify track id. Half the
+  library had no artwork at all — there are **no `cover.*` sidecars on disk**, so a
+  file without an embedded picture leaves Navidrome nothing but its own placeholder.
+  Recovered 621 files, 0 failures. The root cause is closed separately: **`DownloadTrack`
+  now resolves `cover_url` from `spotify_id`** when a caller omits it, because a client
+  enqueueing from a Spotify listening-history export has the id but no image URL.
 - **Navidrome rescan** (`navidrome.go`): the worker POSTs `/rest/startScan` when
   the queue drains and something landed, so downloads appear without waiting on
   Navidrome's own watcher. Config from `NAVIDROME_URL`/`NAVIDROME_USER`/

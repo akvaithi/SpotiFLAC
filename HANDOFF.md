@@ -29,6 +29,31 @@ lookup). The previous compose file is backed up next to it as
 `docker-compose.yml.bak.<timestamp>`. The bundled web UI still works — load it once
 with `?token=...` and `auth.go` drops a `SameSite=Strict` cookie for the session.
 
+## 2026-07-29 (later still) — cover art recovered
+
+Roughly half the library had **no embedded artwork**, so Navidrome served its own
+grey placeholder and every client showed it. Measured before: 88 of 150 sampled
+FLACs carried a picture block, 48 of 90 albums had real art, and there were **no
+`cover.*` files anywhere on disk** for Navidrome to fall back to.
+
+The cause was acquisition, not tagging. Tracks queued from a Spotify
+listening-history export have a track id but no image URL — the export contains
+none — so `cover_url` arrived empty and nothing was embedded. Tracks downloaded
+from a search were unaffected, which is why the split was roughly even and why it
+looked like Navidrome had regressed.
+
+Two changes, both deployed:
+- **`EnrichLibrary` gained a `covers` option**, alongside lyrics and genres: skips
+  files that already have a picture, caches per `artist|album` so an album costs one
+  lookup, rate limited. Spotify is the source because every one of these files was
+  acquired from a Spotify track id.
+- **`DownloadTrack` resolves the cover from `spotify_id`** when the caller supplies
+  no `cover_url`, so this cannot recur for any client.
+
+Result: **621 covers added, 717 already had one, 0 failures**; 150/150 sampled files
+now carry a picture block and **90/90 albums show real art**. Post-deploy checks
+done — gateway URL still `http://172.17.0.1:8081`, token auth still returning 401.
+
 ## Status: working in production
 The user self-hosts this on a **ZimaOS** box (CasaOS-managed Docker). Full flow
 works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
