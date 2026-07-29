@@ -91,6 +91,17 @@ gotcha below) — recreating containers silently invalidates it.
   `backend/tidal.go`, which is the main Tidal route and bypasses `ProgressWriter`
   entirely — it calls `UpdateItemProgress` directly and extrapolates the total from
   the segments fetched so far.
+- **Library enrichment** (`enrich.go`): `EnrichLibrary({lyrics,genres,limit,overwrite})`
+  starts a background pass that writes **synced lyrics (LRCLIB)** and **genres
+  (MusicBrainz)** into the files themselves, then triggers a Navidrome rescan.
+  `GetEnrichStatus` / `StopEnrich` manage it; progress rides the SSE hub as
+  `enrich:progress` / `enrich:done`. Tags belong in the files rather than a client
+  cache — Navidrome then serves them to every client at once. Rules that matter:
+  genre is written with a **merge, never `taglib.Clear`**; files modified in the
+  last 2 minutes are skipped (the download worker may still hold them open); a
+  MusicBrainz match below score 90 or with a non-exact name is discarded; and
+  genres are ranked by tag vote count, not API order. Rate limits are deliberate —
+  1.1s for MusicBrainz as they ask, with per-artist caching.
 - **Navidrome rescan** (`navidrome.go`): the worker POSTs `/rest/startScan` when
   the queue drains and something landed, so downloads appear without waiting on
   Navidrome's own watcher. Config from `NAVIDROME_URL`/`NAVIDROME_USER`/

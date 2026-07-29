@@ -2,6 +2,19 @@
 
 Snapshot of where things stand. Read `CLAUDE.md` for architecture/build details.
 
+## 2026-07-29 — Harmony backfill, and library enrichment
+
+- **662-track backfill** queued from Harmony out of six years of Spotify listening
+  history: 634 completed, 31 failed (4.7%). 26 of the failures are tracks song.link
+  can't find on Tidal at all; 4 are Tidal 401s where the account/region can't stream
+  that particular ID; 1 other. Qobuz as a second source would recover most of the
+  first group.
+- **Deployed `enrich.go`** (image `75db2d6`) and ran a full pass over 1,348 files,
+  writing LRCLIB lyrics and MusicBrainz genres into the tags so Navidrome serves
+  them to every client. Navidrome's genre index was empty before this because every
+  download predating Harmony omitted `embed_genre`.
+- Post-deploy check done: saved Tidal gateway URL is still `http://172.17.0.1:8081`.
+
 ## Status: working in production
 The user self-hosts this on a **ZimaOS** box (CasaOS-managed Docker). Full flow
 works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
