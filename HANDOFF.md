@@ -15,6 +15,20 @@ Snapshot of where things stand. Read `CLAUDE.md` for architecture/build details.
   download predating Harmony omitted `embed_genre`.
 - Post-deploy check done: saved Tidal gateway URL is still `http://172.17.0.1:8081`.
 
+## 2026-07-29 (later) — API token turned on
+
+The public hostname `https://spotiflac.akvaithi.page` was answering the internet
+**unauthenticated**, and the RPC surface includes `ListDirectoryFiles` on arbitrary
+paths. `API_TOKEN` is now set in the compose file's `spotiflac` service and the
+container recreated. Verified: `GetDefaults`, `/api/events` and `ListDirectoryFiles`
+all return `401 {"error":"missing or invalid API token"}` without it, 200 with it.
+
+The token is **not in this repo and must never be**. It lives in the operator's
+macOS Keychain under service `spotiflac-api` (and under `spotiflac` for Harmony's own
+lookup). The previous compose file is backed up next to it as
+`docker-compose.yml.bak.<timestamp>`. The bundled web UI still works — load it once
+with `?token=...` and `auth.go` drops a `SameSite=Strict` cookie for the session.
+
 ## Status: working in production
 The user self-hosts this on a **ZimaOS** box (CasaOS-managed Docker). Full flow
 works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →

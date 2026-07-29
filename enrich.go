@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,11 @@ import (
 type EnrichOptions struct {
 	Lyrics bool `json:"lyrics"`
 	Genres bool `json:"genres"`
+	// Covers embeds front-cover artwork. Needed because the Harmony backfill
+	// enqueued 634 tracks straight from a Spotify listening-history export, which
+	// carries no image URLs — so `cover_url` was empty, nothing was embedded, and
+	// Navidrome serves its own grey placeholder for roughly half the library.
+	Covers bool `json:"covers"`
 	// Limit caps how many files are touched in one run. Zero means no limit.
 	Limit int `json:"limit"`
 	// Overwrite re-fetches even when the tag is already present.
@@ -44,6 +50,7 @@ type EnrichStatus struct {
 	Processed   int    `json:"processed"`
 	LyricsAdded int    `json:"lyrics_added"`
 	GenresAdded int    `json:"genres_added"`
+	CoversAdded int    `json:"covers_added"`
 	Skipped     int    `json:"skipped"`
 	Failed      int    `json:"failed"`
 	Current     string `json:"current,omitempty"`
@@ -92,9 +99,9 @@ func (a *App) EnrichLibrary(opts EnrichOptions) (EnrichStatus, error) {
 		enrichMu.Unlock()
 		return status, fmt.Errorf("an enrichment pass is already running")
 	}
-	if !opts.Lyrics && !opts.Genres {
+	if !opts.Lyrics && !opts.Genres && !opts.Covers {
 		enrichMu.Unlock()
-		return EnrichStatus{}, fmt.Errorf("nothing to do: enable lyrics, genres, or both")
+		return EnrichStatus{}, fmt.Errorf("nothing to do: enable lyrics, genres or covers")
 	}
 	enrichStop = false
 	enrichStatus = EnrichStatus{Running: true, StartedAt: time.Now().Unix()}
@@ -116,7 +123,7 @@ func runEnrichment(opts EnrichOptions) {
 		emitEvent("enrich:done", final)
 
 		// Navidrome only learns about new tags on a rescan.
-		if final.LyricsAdded > 0 || final.GenresAdded > 0 {
+		if final.LyricsAdded > 0 || final.GenresAdded > 0 || final.CoversAdded > 0 {
 			if err := triggerNavidromeScan(); err != nil {
 				fmt.Printf("[enrich] navidrome rescan failed: %v\n", err)
 			}
@@ -137,6 +144,9 @@ func runEnrichment(opts EnrichOptions) {
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	genreCache := map[string][]string{}
+	// Keyed by artist|album, because an album's cover is the same for every track
+	// on it — a 14-track album costs one search, not fourteen.
+	coverCache := map[string]string{}
 	var lastMusicBrainz time.Time
 
 	for _, path := range files {
@@ -197,6 +207,28 @@ func runEnrichment(opts EnrichOptions) {
 				if err := taglib.WriteTags(path, update, 0); err == nil {
 					bumpEnrich(func(s *EnrichStatus) { s.GenresAdded++ })
 					wroteSomething = true
+				}
+			}
+		}
+
+		// Covers last: it rewrites a picture block rather than a text tag, so it
+		// should run after the cheap edits have already succeeded.
+		if opts.Covers && (opts.Overwrite || !hasEmbeddedPicture(path)) {
+			key := strings.ToLower(primaryArtist(artist) + "|" + album)
+			art, cached := coverCache[key]
+			if !cached {
+				art = fetchSpotifyCoverURL(primaryArtist(artist), album, title)
+				coverCache[key] = art
+				time.Sleep(spotifyCoverDelay)
+			}
+			if art != "" {
+				if image := downloadImage(client, art); len(image) > 0 {
+					if err := taglib.WriteImage(path, image); err == nil {
+						bumpEnrich(func(s *EnrichStatus) { s.CoversAdded++ })
+						wroteSomething = true
+					} else {
+						fmt.Printf("[enrich] cover write failed for %s: %v\n", filepath.Base(path), err)
+					}
 				}
 			}
 		}
@@ -420,4 +452,77 @@ func titleCaseGenre(name string) string {
 		parts[index] = strings.ToUpper(string(runes[0])) + string(runes[1:])
 	}
 	return strings.Join(parts, " ")
+}
+
+// ---------------------------------------------------------------- cover art
+
+// Spotify is the right source here rather than MusicBrainz or iTunes: every file
+// in this library was acquired *from* a Spotify track id, so its catalogue is the
+// one that actually matches — including the K-pop, Tamil and Mandopop releases the
+// other services cover patchily.
+const spotifyCoverDelay = 350 * time.Millisecond
+
+// hasEmbeddedPicture reports whether the file already carries artwork.
+//
+// Deliberately not "does the tag exist" — the pass must not re-download a cover
+// for the ~59% of files that already have one, and taglib reads the picture block
+// directly.
+func hasEmbeddedPicture(path string) bool {
+	image, err := taglib.ReadImage(path)
+	return err == nil && len(image) > 0
+}
+
+// fetchSpotifyCoverURL finds the largest cover for an album, falling back to the
+// track when the album search comes back empty (singles and compilations are
+// frequently titled differently from the track that landed on disk).
+func fetchSpotifyCoverURL(artist, album, title string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	if album != "" {
+		if url := firstImage(backendSearch(ctx, album+" "+artist, "album")); url != "" {
+			return url
+		}
+	}
+	return firstImage(backendSearch(ctx, title+" "+artist, "track"))
+}
+
+func backendSearch(ctx context.Context, query, kind string) []backend.SearchResult {
+	results, err := backend.SearchSpotifyByType(ctx, query, kind, 1, 0)
+	if err != nil {
+		return nil
+	}
+	return results
+}
+
+// Images arrives as a comma-joined list, largest first — the same convention the
+// rest of the codebase relies on.
+func firstImage(results []backend.SearchResult) string {
+	for _, result := range results {
+		for _, candidate := range strings.Split(result.Images, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if strings.HasPrefix(candidate, "http") {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func downloadImage(client *http.Client, url string) []byte {
+	response, err := client.Get(url)
+	if err != nil {
+		return nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil
+	}
+	// Spotify's largest covers are ~640×640; the cap is a guard against a redirect
+	// to something unreasonable rather than a real expectation.
+	image, err := io.ReadAll(io.LimitReader(response.Body, 8<<20))
+	if err != nil {
+		return nil
+	}
+	return image
 }
