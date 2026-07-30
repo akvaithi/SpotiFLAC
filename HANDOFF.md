@@ -25,8 +25,15 @@ hi-res tier — Deezer doesn't offer one), and **no fallback source** — a trac
 Deezer doesn't carry now fails into the queue's failed list instead of being
 retried against another provider.
 
-**Not yet deployed to the ZimaOS box as of this entry** — see "Pending" below
-for what's left before the live server is running this.
+**Deployed and verified the same day.** Session copied to
+`/DATA/AppData/flacit-gateway/telegram-session.session`, compose file updated
+(the CasaOS-managed one, not this repo's plain one — same content, different
+formatting), `tidal-gateway` container removed via `--remove-orphans`.
+End-to-end check: `GetFlacItStatus` reports `logged_in: true`; a real
+`EnqueueDownloads` call produced `Kilby Girl - The Backseat Lovers_01.flac`
+(27.2 MB, correct tags) in `/DATA/Media/Music`; Navidrome's log shows the
+worker's on-demand scan picking it up (`tracksImported=1`) within 5 seconds
+of the download finishing.
 
 ## 2026-07-29 — Harmony backfill, and library enrichment
 
@@ -80,14 +87,13 @@ Result: **621 covers added, 717 already had one, 0 failures**; 150/150 sampled f
 now carry a picture block and **90/90 albums show real art**. Post-deploy checks
 done — gateway URL still `http://172.17.0.1:8081`, token auth still returning 401.
 
-## Status: download engine swapped locally, redeploy pending
-The user self-hosts this on a **ZimaOS** box (CasaOS-managed Docker). The
-previously-working flow was Spotify URL → Tidal (via the user's own PKCE
-gateway) → hi-res/lossless FLAC into their Navidrome music folder. As of
-2026-07-30 that engine has been replaced locally (code complete, builds clean)
-with Spotify URL → Deezer via `@deezload2bot`/Telegram → 16-bit/44.1kHz FLAC.
-**The live server is still running the old Tidal-gateway image** until the
-deploy steps below are completed.
+## Status: working in production (Telegram/Deezer engine)
+The user self-hosts this on a **ZimaOS** box (CasaOS-managed Docker). As of
+2026-07-30 the download engine is Spotify URL → Deezer via
+`@deezload2bot`/Telegram (see that day's entry above) → 16-bit/44.1kHz FLAC
+into their Navidrome music folder. The previous flow — Tidal via the user's
+own PKCE gateway, hi-res-capable — is gone; that engine was removed, not kept
+as a fallback. Deployed and verified the same day.
 
 ## Where things live
 - **Repo**: https://github.com/akvaithi/SpotiFLAC (public, `main`)
@@ -163,14 +169,12 @@ deploy steps below are completed.
     `backend/flacit.go`, ported from FlacIt's `@deezload2bot` MTProto pipeline.
 
 ## Pending / not yet deployed
-- **The 2026-07-30 Telegram/flacit-gateway swap (see top of file) — not yet on
-  the live server.** Still needed: copy a working Telethon session onto the box
-  at `/DATA/AppData/flacit-gateway/telegram-session.session`, update the
-  server's compose file (drop `tidal-gateway`, add `flacit-gateway`, set
-  `FLACIT_GATEWAY_URL`), push to `main` so CI builds `flacit-gateway:latest`,
-  flip that ghcr package public, then `docker compose pull && up -d` and verify
-  `GetFlacItStatus` reports `logged_in: true` before trusting it with a real
-  download.
+- Nothing outstanding from the 2026-07-30 Telegram/flacit-gateway swap — see
+  top of file. One note for next time: the new `flacit-gateway` ghcr package
+  turned out to already be public with no visibility flip needed (unlike a
+  brand-new package in the general case, per Step 0 of SETUP.md) — worth
+  checking with a plain `docker pull` before assuming the manual UI step is
+  required.
 - **Navidrome credentials are configured** in
   `/DATA/AppData/spotiflac/config/.spotiflac/config.json` (`navidromeUrl` =
   `http://172.17.0.1:4533` — docker0 host gateway, *not* a container IP —
