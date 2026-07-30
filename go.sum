@@ -1,5 +1,3 @@
-github.com/Eyevinn/mp4ff v0.52.0 h1:QJUi2PtROeZGkcumbX7f4/91Jz6dlhjeKzpwSdCoYG8=
-github.com/Eyevinn/mp4ff v0.52.0/go.mod h1:LKZAf3K+OtWYdzlvte8uafD/e3g2aK2WcsgVohvjccU=
 github.com/bogem/id3v2/v2 v2.1.4 h1:CEwe+lS2p6dd9UZRlPc1zbFNIha2mb2qzT1cCEoNWoI=
 github.com/bogem/id3v2/v2 v2.1.4/go.mod h1:l+gR8MZ6rc9ryPTPkX77smS5Me/36gxkMgDayZ9G1vY=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc h1:biVzkmvwrH8WK8raXaxBx6fRVTlJILwEwQGL1I/ByEI=
@@ -13,8 +11,6 @@ github.com/go-flac/flacvorbis v0.2.0 h1:KH0xjpkNTXFER4cszH4zeJxYcrHbUobz/RticWGO
 github.com/go-flac/flacvorbis v0.2.0/go.mod h1:uIysHOtuU7OLGoCRG92bvnkg7QEqHx19qKRV6K1pBrI=
 github.com/go-flac/go-flac v1.0.0 h1:6qI9XOVLcO50xpzm3nXvO31BgDgHhnr/p/rER/K/doY=
 github.com/go-flac/go-flac v1.0.0/go.mod h1:WnZhcpmq4u1UdZMNn9LYSoASpWOCMOoxXxcWEHSzkW8=
-github.com/go-test/deep v1.1.0 h1:WOcxcdHcvdgThNXjw0t76K42FXTU7HpNQWHpA2HHNlg=
-github.com/go-test/deep v1.1.0/go.mod h1:5C2ZWiW0ErCdrYzpqxLbTX7MG14M9iiw8DgHncVwcsE=
 github.com/leaanthony/slicer v1.6.0 h1:1RFP5uiPJvT93TAHi+ipd3NACobkW53yUiBqZheE/Js=
 github.com/leaanthony/slicer v1.6.0/go.mod h1:o/Iz29g7LN0GqH3aMjWAe90381nyZlDNquK+mtH2Fj8=
 github.com/leaanthony/u v1.1.1 h1:TUFjwDGlNX+WuwVEzDqQwC2lOv0P4uhTQw7CMFdiK7M=

@@ -1,9 +1,8 @@
-module github.com/afkarxyz/SpotiFLAC
+module github.com/akvaithi/SpotiFLAC
 
 go 1.26
 
 require (
-	github.com/Eyevinn/mp4ff v0.52.0
 	github.com/bogem/id3v2/v2 v2.1.4
 	github.com/go-flac/flacpicture v0.3.0
 	github.com/go-flac/flacvorbis v0.2.0

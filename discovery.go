@@ -1,6 +1,6 @@
 package main
 
-import "github.com/afkarxyz/SpotiFLAC/backend"
+import "github.com/akvaithi/SpotiFLAC/backend"
 
 // GetRelatedArtists returns Spotify's "fans also like" for an artist id, URI or
 // open.spotify.com URL. Used by clients that browse the catalog rather than

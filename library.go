@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/afkarxyz/SpotiFLAC/backend"
+	"github.com/akvaithi/SpotiFLAC/backend"
 )
 
 // Library dedup index.

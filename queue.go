@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/afkarxyz/SpotiFLAC/backend"
+	"github.com/akvaithi/SpotiFLAC/backend"
 )
 
 // Durable download queue worker.

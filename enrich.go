@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/afkarxyz/SpotiFLAC/backend"
+	"github.com/akvaithi/SpotiFLAC/backend"
 	"go.senan.xyz/taglib"
 )
 

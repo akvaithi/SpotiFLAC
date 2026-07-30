@@ -1,138 +1,96 @@
-<div align="left">
-  <a href="https://trendshift.io/repositories/15737" target="_blank"><img
-      src="https://trendshift.io/api/badge/repositories/15737" alt="afkarxyz%2FSpotiFLAC | Trendshift"
-      style="width: 250px; height: 55px;" width="250" height="55" /></a>
+# SpotiFLAC (self-hosted, headless)
 
-  <h1>SpotiFLAC</h1>
-  <p>
-    Get Spotify tracks in true FLAC from Tidal, Qobuz &amp; Amazon Music — no account required.
-  </p>
-  <p>
-    <a href="https://github.com/spotbye/SpotiFLAC/stargazers"><img
-        src="https://img.shields.io/github/stars/spotbye/SpotiFLAC?color=ffcb47&labelColor=black&logo=github&label=Stars" /></a><a
-      href="https://github.com/spotbye/SpotiFLAC/releases"><img
-        src="https://img.shields.io/github/downloads/spotbye/SpotiFLAC/total?color=22c55e&labelColor=black&logo=github&label=Downloads" /></a><a
-      href="https://github.com/spotbye/SpotiFLAC/releases/latest"><img
-        src="https://img.shields.io/github/v/release/spotbye/SpotiFLAC?color=8b5cf6&labelColor=black&logo=github&label=Latest%20Release" /></a><a
-      href="https://github.com/spotbye/SpotiFLAC/releases/latest"><img
-        src="https://img.shields.io/badge/Windows-10%2B-369eff?labelColor=black&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1MTIiIGhlaWdodD0iNTEyIiB2aWV3Qm94PSIwIDAgMjAgMjAiPjxwYXRoIGZpbGw9IiNmZmZmZmYiIGZpbGwtcnVsZT0iZXZlbm9kZCIgZD0iTTIwIDEwLjg3M1YyMEw4LjQ3OSAxOC41MzdsLjAwMS03LjY2NEgyMFptLTEzLjEyIDBsLS4wMDEgNy40NjFMMCAxNy40NjF2LTYuNTg4aDYuODhaTTIwIDkuMjczSDguNDhsLS4wMDEtNy44MUwyMCAwdjkuMjczWk02Ljg3OSAxLjY2NmwuMDAxIDcuNjA3SDBWMi41MzlsNi44NzktLjg3M1oiLz48L3N2Zz4=" /></a><a
-      href="https://github.com/spotbye/SpotiFLAC/releases/latest"><img
-        src="https://img.shields.io/badge/macOS-10.13%2B-FFFFFF?labelColor=black&logo=apple&logoColor=white" /></a><a
-      href="https://github.com/spotbye/SpotiFLAC/releases/latest"><img
-        src="https://img.shields.io/badge/Linux-Any-FCC624?labelColor=black&logo=linux&logoColor=white" /></a><a
-      href="https://t.me/spotiflac"><img
-        src="https://img.shields.io/badge/Announcements-369eff?labelColor=black&logo=telegram&logoColor=white" /></a>
-    <br />
-    <br />
-    <a href="https://github.com/spotbye/SpotiFLAC/releases/latest" target="_blank"><img
-        src="https://github.com/user-attachments/assets/ec33b07f-27a2-40bb-8215-8ad497abd82b" alt="Dark"
-        width="49%" /></a>
-    <a href="https://github.com/spotbye/SpotiFLAC/releases/latest" target="_blank"><img
-        src="https://github.com/user-attachments/assets/91a70402-930d-4f38-9d8a-99413a6c9694" alt="Light"
-        width="49%" /></a>
-  </p>
-</div>
+A **headless Docker rebuild** of [afkarxyz/SpotiFLAC](https://github.com/afkarxyz/SpotiFLAC),
+this fork's upstream base. The original is a Wails desktop app; this repo replaces
+that GUI with an HTTP server + embedded web UI, so it runs unattended on a home
+server instead of a laptop. Paste a Spotify track/album/playlist URL (or search),
+and it lands as a lossless FLAC on a mounted volume — used as the acquisition
+backend for [Harmony](https://github.com/akvaithi/Harmony), a native macOS client
+for a Navidrome + SpotiFLAC stack, but works standalone through its own web UI too.
 
-### [Download](https://github.com/spotbye/SpotiFLAC/releases/latest)
+> Personal, self-hosted tooling — see [`README-WEB.md`](README-WEB.md) for the full
+> architecture and [`SETUP.md`](SETUP.md) for a from-scratch ZimaOS/Docker walkthrough.
 
-## Other projects
+## Custom download engine: Telegram, not Tidal/Qobuz/Amazon
 
-### [SpotiFLAC Next](https://github.com/spotbye/SpotiFLAC-Next)
+The upstream project resolves a Spotify track against Tidal, Qobuz and Amazon
+Music, each behind its own community-server/gateway arrangement. This fork
+replaces all three with a single custom source, ported from
+[**FlacIt**](https://github.com/BunnY-exe/FlacIt): a `flacit-gateway` sidecar
+runs a persistent [Telethon](https://github.com/LonamiWebs/Telethon) (MTProto)
+session against Telegram's `@deezload2bot`, which sources lossless FLAC from
+Deezer, and pulls the result down with 16 parallel connections against the
+file's own Telegram data center.
 
-Get Spotify tracks in true Lossless from Tidal, Qobuz, Amazon Music & Deezer — no account required.
+```
+web UI ──HTTP/SSE──► spotiflac (Go)  ── Spotify catalog, tagging, queue,
+                          │              library index, dedup, enrichment
+                          └──HTTP──► flacit-gateway (Python/Telethon)
+                                       ── drives @deezload2bot, downloads
+                                          the FLAC it posts
+```
 
-### [SpotubeDL.com](https://spotubedl.com)
+Two containers, two images (`ghcr.io/akvaithi/spotiflac`,
+`ghcr.io/akvaithi/flacit-gateway`) — everything Spotify-side (catalog, search,
+metadata, tagging, the durable download queue, library dedup, lyrics/genre/cover
+enrichment, Navidrome rescan) is unchanged from upstream and provider-agnostic;
+only the *download source* was swapped. Trade-offs that come with it: 16-bit/
+44.1kHz FLAC only (no hi-res tier), and no fallback source for a track Deezer
+doesn't carry. See [`CLAUDE.md`](CLAUDE.md) for the mechanism in full and
+[`flacit-gateway/README.md`](flacit-gateway/README.md) for that sidecar's own
+contract.
 
-Download Spotify Tracks, Albums, Playlists & Discography as MP3/OGG/Opus.
+## Quick start
 
-## Related projects
+```bash
+docker compose up -d
+# then open http://<host>:8080
+```
 
-> [!NOTE]
->
-> Related projects are maintained by the community and are not affiliated with the core SpotiFLAC desktop build.
-
-### [SpotiFLAC (Mobile)](https://github.com/zarzet/SpotiFLAC-Mobile)
-
-SpotiFLAC for Android & iOS — maintained by [@zarzet](https://github.com/zarzet)
-
-### [SpotiFLAC (Python Module)](https://github.com/ShuShuzinhuu/SpotiFLAC-Module-Version)
-
-SpotiFLAC Python library for SpotiFLAC integration — maintained by [@ShuShuzinhuu](https://github.com/ShuShuzinhuu)
+Needs a bootstrapped Telegram session before downloads work — see
+[`SETUP.md`](SETUP.md) for the full walkthrough, including how to get one.
 
 ## FAQ
 
 <details>
-<summary>Is this software free?</summary>
+<summary>Is this free?</summary>
 
-_Yes. This software is completely free.
-You do not need an account, login, or subscription.
-All you need is an internet connection._
+Yes. No account, login or subscription — the Telegram bot and Spotify's public
+metadata are all it needs.
 
 </details>
 
 <details>
-<summary>Can using this software get my Spotify account suspended or banned?</summary>
+<summary>Can this get my Spotify account suspended or banned?</summary>
 
-_No.
-This software has no connection to your Spotify account.
-Spotify data is obtained through reverse engineering of the Spotify Web Player, not through user authentication._
+No. Spotify data is read from its public web player, not through user
+authentication — there's no Spotify login involved at all.
 
 </details>
 
 <details>
 <summary>Where does the audio come from?</summary>
 
-_The audio is fetched using third-party APIs._
+Deezer, by way of a Telegram bot (`@deezload2bot`) — see the architecture
+section above.
 
 </details>
-
-<details>
-<summary>Why does metadata fetching sometimes fail?</summary>
-
-_This usually happens because your IP address has been rate-limited.
-You can wait and try again later, or use a VPN to bypass the rate limit._
-
-</details>
-
-<details>
-<summary>Why does Windows Defender or antivirus flag or delete the file?</summary>
-
-_This is a false positive.
-It likely happens because the executable is compressed using UPX._
-
-_If you are concerned, you can fork the repository and build the software yourself from source._
-
-</details>
-
-<details>
-<summary>Want to support the project?</summary>
-
-_If this software is useful and brings you value,
-consider supporting the project by buying me a coffee.
-Your support helps keep development going._
-
-</details>
-
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/afkarxyz)
 
 ## Disclaimer
 
-This project is for **educational and private use only**. The developer does not condone or encourage copyright infringement.
+This project is for **personal, self-hosted use**. It is not affiliated with,
+endorsed by, or connected to Spotify, Deezer, Telegram, or the maintainers of
+the upstream SpotiFLAC or FlacIt projects. You are responsible for complying
+with your local laws and the Terms of Service of the platforms involved. The
+software is provided "as is", without warranty of any kind — see
+[`LICENSE`](LICENSE).
 
-**SpotiFLAC** is a third-party tool and is not affiliated with, endorsed by, or connected to Spotify, Tidal, Qobuz, Amazon Music or any other streaming service.
+## Credits
 
-You are solely responsible for:
-
-1. Ensuring your use of this software complies with your local laws.
-2. Reading and adhering to the Terms of Service of the respective platforms.
-3. Any legal consequences resulting from the misuse of this tool.
-
-The software is provided "as is", without warranty of any kind. The author assumes no liability for any bans, damages, or legal issues arising from its use.
-
-## API Credits
-
-[MusicBrainz](https://musicbrainz.org) · [LRCLIB](https://lrclib.net) · [Songlink/Odesli](https://song.link) · [Songstats](https://songstats.com) · [hifi-api](https://github.com/binimum/hifi-api) · [Qobuz-DL](https://github.com/QobuzDL/Qobuz-DL)
-
-> [!TIP]
->
-> **Star Us**, You will receive all release notifications from GitHub without any delay ~
+- [afkarxyz/SpotiFLAC](https://github.com/afkarxyz/SpotiFLAC) — the upstream
+  project this fork is built on: Spotify catalog/metadata, tagging, the
+  download queue and library tooling
+- [BunnY-exe/FlacIt](https://github.com/BunnY-exe/FlacIt) — the Telegram/MTProto
+  download pipeline `flacit-gateway` is ported from
+- [MusicBrainz](https://musicbrainz.org) · [LRCLIB](https://lrclib.net) ·
+  [Songlink/Odesli](https://song.link) — metadata, lyrics and link resolution
