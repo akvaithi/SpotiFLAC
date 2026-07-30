@@ -16,8 +16,8 @@ jobs:
         include:
           - image: spotiflac
             context: .
-          - image: tidal-gateway
-            context: ./tidal-gateway
+          - image: flacit-gateway
+            context: ./flacit-gateway
     steps:
       - name: Checkout
         uses: actions/checkout@v4

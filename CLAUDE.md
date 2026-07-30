@@ -5,22 +5,28 @@ app). The desktop GUI was replaced with an HTTP server + embedded web UI; the
 download engine in `backend/` is reused mostly unchanged. Personal/self-hosted use.
 
 ## What it does
-Paste a Spotify track/album/playlist URL (or search) → resolves to Tidal/Qobuz/
-Amazon → downloads lossless FLAC to a mounted volume. Runs on the user's ZimaOS
-box in Docker. A companion **Tidal gateway** (`tidal-gateway/`) lets downloads use
-the user's own Tidal subscription instead of the shared community servers.
+Paste a Spotify track/album/playlist URL (or search) → resolves to a Deezer track
+link → downloads lossless FLAC to a mounted volume via the **flacit-gateway**
+sidecar, which drives Telegram's `@deezload2bot` over MTProto (Telethon) and pulls
+the file with 16 parallel connections. Runs on the user's ZimaOS box in Docker.
+
+This is SpotiFLAC's **only** download source — the Tidal/Qobuz/Amazon engines, the
+community Cloudflare verification bridge, and the Tidal PKCE gateway were removed
+entirely (2026-07-30) in favor of this pipeline, ported from
+[FlacIt](https://github.com/BunnY-exe/FlacIt). Consequences worth remembering:
+16-bit/44.1kHz only (no hi-res tier), and no fallback source — a track Deezer
+doesn't carry fails into the queue's failed list rather than retrying elsewhere.
 
 ## Architecture (files added for the web port, all `package main` in repo root)
 - `main.go` — HTTP server, static UI serving (`//go:embed all:web`), `/api/file`
   download, `CONFIG_DIR`→`$HOME` redirect, graceful shutdown. **No WriteTimeout**
-  (downloads/verification block for minutes). Static served with `Cache-Control:
-  no-store` so image updates aren't masked by stale browser JS.
+  (downloads can block for minutes). Static served with `Cache-Control: no-store`
+  so image updates aren't masked by stale browser JS.
 - `rpc.go` — reflection dispatcher: `POST /api/rpc/{Method}` calls any exported
   `*App` method with a JSON array of args. This exposes the entire backend without
   hand-writing handlers. The web UI calls methods through this.
 - `events.go` — SSE hub (`/api/events`) replacing Wails `EventsEmit`. Use
   `emitEvent(name, data)`.
-- `verify.go` — community Cloudflare verification bridge (see below).
 - `queue.go` + `backend/queue_store.go` — durable download queue (see below).
 - `navidrome.go` — Subsonic rescan trigger + status (see below).
 - `auth.go` — optional `API_TOKEN` bearer auth, off by default (see below).
@@ -28,9 +34,14 @@ the user's own Tidal subscription instead of the shared community servers.
 - `library.go` — dedup index (see below).
 - `app.go` — the old Wails bindings, de-Wailsed (dialogs stubbed, events → SSE).
   Holds `DownloadTrack` and all `*App` methods.
-- `backend/` — the download engine. Reused; a few targeted edits (see Gotchas).
+- `backend/flacit.go` — the download engine: resolves a Deezer link, drives the
+  gateway's job API, tags the result. `GetFlacItGatewayURL()` in `backend/config.go`
+  resolves the gateway address (env → setting → docker0 default).
+- `backend/` (rest) — Spotify metadata/catalog, tagging, lyrics, enrichment,
+  library index/dedup. Provider-agnostic; untouched by the download-source swap.
 - `web/` — vanilla-JS SPA (no build step): `index.html`, `app.js`, `style.css`.
-- `tidal-gateway/` — separate Python/Flask service (its own image).
+- `flacit-gateway/` — separate Python/Flask/Telethon service (its own image); see
+  its own README for the contract and one-time Telegram session bootstrap.
 
 ## Build / test / run (locally, macOS)
 Toolchain: Go (via brew), no cgo needed.
@@ -49,7 +60,7 @@ present in the image. Don't add cgo — the pure-Go build is why the image is ti
 `.github/workflows/docker-publish.yml` builds **two images** on push to `main`
 (matrix, linux/amd64) using the Actions `GITHUB_TOKEN`:
 - `ghcr.io/akvaithi/spotiflac:latest`
-- `ghcr.io/akvaithi/tidal-gateway:latest`
+- `ghcr.io/akvaithi/flacit-gateway:latest`
 
 Flow for any change: edit → `CGO_ENABLED=0 go build` to verify → commit → push →
 watch `gh run watch` → `docker compose pull && up -d` on the ZimaOS box. Both
@@ -62,8 +73,8 @@ repo is public. The SSH password is read from the macOS Keychain at the moment
 of use (`security find-generic-password -s spotiflac-deploy -w`); never write it
 into a file, a commit, or the conversation.
 
-After **every** deploy, re-check the saved Tidal gateway URL (see the bridge
-gotcha below) — recreating containers silently invalidates it.
+After **every** deploy, re-check the saved flacit-gateway URL (see the gateway
+IP gotcha below) — recreating containers silently invalidates it.
 
 ## Key mechanisms / gotchas
 - **Durable download queue** (`queue.go`, `backend/queue_store.go`): `DownloadTrack`
@@ -85,12 +96,12 @@ gotcha below) — recreating containers silently invalidates it.
 - **Per-item progress over SSE**: `ProgressInfo` is global and can't describe a
   queue. `backend.SetItemProgressListener` now feeds `download:progress`
   (`{id, progress_mb, total_mb, speed_mbps}`, throttled to 4/s) and the worker
-  emits `download:item` on every status change. Two paths report progress and
-  **both** need maintaining: `ProgressWriter` (auto-binds to `GetCurrentItemID()`,
-  covers Qobuz/Amazon/direct Tidal) and the **DASH segment loop** in
-  `backend/tidal.go`, which is the main Tidal route and bypasses `ProgressWriter`
-  entirely — it calls `UpdateItemProgress` directly and extrapolates the total from
-  the segments fetched so far.
+  emits `download:item` on every status change. `backend/flacit.go` reports
+  progress two ways depending on phase: `awaitReady` polls the gateway's job
+  status and calls `SetItemTotalSize`/`UpdateItemProgress` directly (the same
+  "bypass `ProgressWriter`" pattern the old Tidal DASH loop used, since there's no
+  `io.Writer` to hang one off during that phase), then `downloadFile` uses
+  `NewProgressWriterWithID` for the actual gateway→server byte copy.
 - **Library enrichment** (`enrich.go`): `EnrichLibrary({lyrics,genres,covers,limit,overwrite})`
   starts a background pass that writes **synced lyrics (LRCLIB)** and **genres
   (MusicBrainz)** into the files themselves, then triggers a Navidrome rescan.
@@ -127,22 +138,18 @@ gotcha below) — recreating containers silently invalidates it.
   hash to rot. **`GetArtistMembers`** hits MusicBrainz `artist-rels`; it must dedupe,
   since MusicBrainz emits one relation per instrument (a 4-instrument member
   otherwise appears 4×).
-- **Community Cloudflare verification** (`verify.go`): the verify service
-  *strictly* requires the callback to be `http://127.0.0.1|localhost:<port>/session-grant`.
-  We do NOT rewrite it. User solves the challenge, lands on an unreachable
-  loopback page, pastes that URL back; we relay the `grant` to the backend's
-  loopback listener inside the container. HMAC session is cached in `/config`.
-- **Custom gateway URLs must accept `http://`**: upstream `NewTidalDownloader` /
-  Qobuz `SetCustomAPIURL` / `CheckCustomQobuzAPI` originally required `https://`
-  and silently dropped LAN/Docker `http://` gateways. Patched to accept both. The
-  UI (`buildRequest`) reads the gateway URL from the Settings field directly (not
-  just saved settings) so it applies even if "Save" wasn't clicked.
-- **No-FLAC fallback**: `backend/tidal.go` `DownloadFromManifest` aborted when a
-  lossless request got a lossy stream. Now gated by `SetAllowLossyFallback(bool)`
-  (request field `allow_lossy_fallback`, UI default on) so it transcodes the
-  available stream to a playable `.flac` instead of failing. (A cleaner `.m4a`
-  output would require propagating the extension up through `buildTidalOutputPath`
-  and the caller — not yet done.)
+- **Deezer link resolution** (`backend/flacit.go` `resolveTrackURL`): prefers a
+  Deezer track URL over the bare Spotify one, via the existing
+  `SongLinkClient.GetDeezerURLFromSpotify` — it already chains song.link's Deezer
+  match, an ISRC lookup, and Deezer's ISRC API as internal fallbacks, so there's
+  nothing left to retry at the call site. Falls back to the Spotify link only if
+  every one of those fails. Deliberately **no fuzzy bot-side search** — a wrong
+  inline-query match could file a remix or live cut under the right track's name.
+- **The gateway serializes fetches**: `flacit-gateway`'s `/fetch` queues jobs and
+  a single worker drains them one at a time, because the bot chat is one stateful
+  conversation — a reply is matched by "a new inbound message after the id
+  recorded before sending", which two concurrent fetches would race for.
+  SpotiFLAC's own download worker is already serial, so this costs nothing.
 - **Library dedup** (`library.go`): `ScanLibrary(dir)` walks the download folder
   and keeps **one entry per file** (path/size/mtime + ISRC/title/artist/album,
   filename fallback), persisted to `/config/library-index.json` (v2 format).
@@ -164,34 +171,32 @@ gotcha below) — recreating containers silently invalidates it.
   library dir since it's RPC-reachable, and the scan walk skips dot-directories
   so trashed files don't reappear. `GetLibraryTrash`/`EmptyLibraryTrash` manage
   the trash. UI lives in the Library tab.
-- **Spotify→Tidal rematch** (`backend/tidal_rematch.go`): song.link maps a
-  Spotify track to *a* Tidal ID, often one the account/region can't stream —
-  Tidal 404/401s on `playbackinfopostpaywall`, the gateway turns that into 502,
-  and the track fails even though the same song downloads fine when searched
-  manually. After all qualities fail, `DownloadByURL` asks the gateway's
-  `GET /search/?q=&isrc=` for the same recording under another ID (ISRC match
-  first, then normalized title + first artist) and retries up to 3 candidates.
-  Needs a custom gateway; the community endpoints expose no search. Tidal API
-  errors now carry the response body so the real upstream status is visible.
 - **Gateway URL must not be a container IP**: both containers run
   `network_mode: bridge` (the default docker0 bridge), so container IPs shift on
-  every recreate and container-name DNS doesn't resolve. A saved
-  `http://172.17.0.x:8081` breaks on the next deploy and downloads silently fall
-  back to the community servers. Use `http://172.17.0.1:8081` — docker0's host
-  gateway plus the gateway's published port — which is stable.
-- **Tidal gateway = PKCE**: device-login is capped at HIGH/AAC by Tidal; only
-  tidalapi's PKCE flow unlocks lossless/hi-res. Login is a browser paste flow at
-  `GET/POST /login`. Session persists in `/config/tidal-session.json` (with
-  `is_pkce`). Contract it serves: `GET /track/?id=&quality=` →
-  `{data:{manifest:"<base64>", manifestMimeType, assetPresentation}}`.
+  every recreate and container-name DNS doesn't resolve. Use
+  `http://172.17.0.1:8082` — docker0's host gateway plus flacit-gateway's
+  published port — which is stable. `GetFlacItGatewayURL()` resolves it as
+  `FLACIT_GATEWAY_URL` env → `flacitApiUrl` setting → that default.
+- **Telegram session bootstrap**: `flacit-gateway` needs an authenticated
+  Telethon session at `/config/telegram-session.session`, and a fresh login isn't
+  enough by itself — the account must also have manually started
+  `@deezload2bot` and joined its channel once, or every fetch times out. The
+  sanctioned path is copying an already-bootstrapped session onto the box (see
+  `flacit-gateway/README.md`); `/login` is the recovery flow, not the default one.
+- **FLAC quality is bot-side state, not per-request**: `@deezload2bot` defaults to
+  MP3 320kbps and has to be switched to FLAC once via its `/settings` menu — the
+  gateway automates this on first successful connection (`_ensure_flac_quality`)
+  and records it in `/config/.flac_quality_set` so it only runs once. `_is_flac()`
+  double-checks every incoming document (mime **and** filename) anyway, since a
+  quality flag can be silently reset bot-side.
 
 ## Boundaries (do NOT build)
-- No bypass of the community servers' **rate limits / scheduled breaks** — that's
-  the operator's infra; the sanctioned alternative is the user's own gateway.
+- No fuzzy bot-side search fallback for `resolveTrackURL` — a wrong inline-query
+  match could file a remix or live cut under the right track's name. Link-only
+  was a deliberate choice, not an oversight.
 - No **Spotify-audio extraction** (librespot/DRM) — Spotify is lossy + DRM; it's
   used only for metadata here. Declined previously.
-Keep both community and custom-gateway paths working. Everything is ToS-gray
-personal-use tooling; keep that framing.
+Everything is ToS-gray personal-use tooling; keep that framing.
 
 ## Conventions
 - Match existing style; keep the UI dependency-free (no build step).

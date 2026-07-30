@@ -50,12 +50,6 @@ func main() {
 		log.Printf("warning: could not create download dir %s: %v", downloadDir, err)
 	}
 
-	// If PUBLIC_URL is set (e.g. behind a reverse proxy), pin the verification
-	// callback base to it instead of inferring from request Host headers.
-	if pu := strings.TrimRight(os.Getenv("PUBLIC_URL"), "/"); pu != "" {
-		setPublicBase(pu)
-	}
-
 	backend.AppVersion = appVersion
 
 	initAPIToken()
@@ -72,18 +66,17 @@ func main() {
 	startDownloadWorker(app)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/rpc/", requireAPIToken(withPublicBase(handleRPC(app))))
+	mux.HandleFunc("/api/rpc/", requireAPIToken(handleRPC(app)))
 	mux.HandleFunc("/api/events", requireAPIToken(handleEvents))
 	mux.HandleFunc("/api/server-info", handleServerInfo)
 	mux.HandleFunc("/api/file", requireAPIToken(handleFileDownload))
-	mux.HandleFunc("/api/verify/complete", handleVerifyComplete)
 	mux.Handle("/", staticHandler())
 
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 15 * time.Second,
-		// No WriteTimeout: downloads and blocking verification can take minutes.
+		// No WriteTimeout: downloads can block for minutes.
 		IdleTimeout: 5 * time.Minute,
 	}
 
@@ -108,25 +101,6 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// withPublicBase captures the externally-visible base URL (scheme://host) from
-// the first requests so the verification bridge can build absolute callbacks.
-func withPublicBase(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		scheme := "http"
-		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-			scheme = "https"
-		}
-		host := r.Host
-		if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
-			host = fwd
-		}
-		if host != "" {
-			setPublicBase(scheme + "://" + host)
-		}
-		next(w, r)
-	}
 }
 
 func handleServerInfo(w http.ResponseWriter, r *http.Request) {

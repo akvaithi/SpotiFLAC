@@ -46,60 +46,6 @@ type APIStatusReport struct {
 	Details    []APIStatusTargetResult `json:"details"`
 }
 
-type CommunityBreakStatus struct {
-	Enabled          bool   `json:"enabled"`
-	IsBreak          bool   `json:"is_break"`
-	RemainingMinutes int    `json:"remaining_minutes"`
-	Available        bool   `json:"available"`
-	Error            string `json:"error,omitempty"`
-}
-
-func fetchCommunityBreakStatus(downloadURL string) CommunityBreakStatus {
-	breakURL := strings.TrimSuffix(downloadURL, "/api/dl") + "/api/break"
-	client := &http.Client{Timeout: checkOperationTimeout}
-	resp, err := client.Get(breakURL)
-	if err != nil {
-		return CommunityBreakStatus{Error: err.Error()}
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return CommunityBreakStatus{Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
-	}
-	var result CommunityBreakStatus
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16*1024)).Decode(&result); err != nil {
-		return CommunityBreakStatus{Error: err.Error()}
-	}
-	result.Available = true
-	return result
-}
-
-func (a *App) GetCommunityBreakStatuses() map[string]CommunityBreakStatus {
-	type target struct {
-		name string
-		url  string
-	}
-	targets := []target{
-		{name: "tidal", url: backend.GetTidalCommunityDownloadURL()},
-		{name: "qobuz", url: backend.GetQobuzCommunityDownloadURL()},
-		{name: "amazon", url: backend.GetAmazonCommunityDownloadURL()},
-	}
-	results := make(map[string]CommunityBreakStatus, len(targets))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, item := range targets {
-		wg.Add(1)
-		go func(item target) {
-			defer wg.Done()
-			status := fetchCommunityBreakStatus(item.url)
-			mu.Lock()
-			results[item.name] = status
-			mu.Unlock()
-		}(item)
-	}
-	wg.Wait()
-	return results
-}
-
 const checkOperationTimeout = 10 * time.Second
 const spotiFLACNextStatusURL = "https://gist.githubusercontent.com/afkarxyz/6e57cd362cbd67f889e3a91a76254a5e/raw"
 const spotiFLACCurrentStatusURL = "https://gist.githubusercontent.com/afkarxyz/7e392bc94ec2faaf74ef7d80025636eb/raw"
@@ -311,19 +257,11 @@ func (a *App) getFirstArtist(artistString string) string {
 }
 
 func (a *App) startup() {
-	backend.SetCommunityVerificationHandlers(
-		webOpenBrowser,
-		func() {},
-	)
-
 	if err := backend.InitHistoryDB("SpotiFLAC"); err != nil {
 		fmt.Printf("Failed to init history DB: %v\n", err)
 	}
 	if err := backend.InitISRCCacheDB(); err != nil {
 		fmt.Printf("Failed to init ISRC cache DB: %v\n", err)
-	}
-	if err := backend.CleanupLegacyTidalPublicAPIState(); err != nil {
-		fmt.Printf("Failed to clean legacy Tidal API cache: %v\n", err)
 	}
 	if err := backend.SanitizePersistedConfigSettings(); err != nil {
 		fmt.Printf("Failed to sanitize persisted config settings: %v\n", err)
@@ -354,8 +292,6 @@ type DownloadRequest struct {
 	AlbumArtist                string `json:"album_artist,omitempty"`
 	ReleaseDate                string `json:"release_date,omitempty"`
 	CoverURL                   string `json:"cover_url,omitempty"`
-	TidalAPIURL                string `json:"tidal_api_url,omitempty"`
-	QobuzAPIURL                string `json:"qobuz_api_url,omitempty"`
 	OutputDir                  string `json:"output_dir,omitempty"`
 	AudioFormat                string `json:"audio_format,omitempty"`
 	FilenameFormat             string `json:"filename_format,omitempty"`
@@ -365,7 +301,6 @@ type DownloadRequest struct {
 	SpotifyID                  string `json:"spotify_id,omitempty"`
 	EmbedLyrics                bool   `json:"embed_lyrics,omitempty"`
 	EmbedMaxQualityCover       bool   `json:"embed_max_quality_cover,omitempty"`
-	ServiceURL                 string `json:"service_url,omitempty"`
 	Duration                   int    `json:"duration,omitempty"`
 	ItemID                     string `json:"item_id,omitempty"`
 	SpotifyTrackNumber         int    `json:"spotify_track_number,omitempty"`
@@ -378,10 +313,6 @@ type DownloadRequest struct {
 	Composer                   string `json:"composer,omitempty"`
 	PlaylistName               string `json:"playlist_name,omitempty"`
 	PlaylistOwner              string `json:"playlist_owner,omitempty"`
-	AllowFallback              bool   `json:"allow_fallback"`
-	AllowLossyFallback         bool   `json:"allow_lossy_fallback"`
-	AllowAtmosFallback         bool   `json:"allow_atmos_fallback"`
-	AtmosFallbackQuality       string `json:"atmos_fallback_quality,omitempty"`
 	UseFirstArtistOnly         bool   `json:"use_first_artist_only,omitempty"`
 	UseSingleGenre             bool   `json:"use_single_genre,omitempty"`
 	EmbedGenre                 bool   `json:"embed_genre,omitempty"`
@@ -614,15 +545,14 @@ func (a *App) SearchSpotifyByType(req SpotifySearchByTypeRequest) ([]backend.Sea
 
 func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 
-	if req.Service == "qobuz" && req.SpotifyID == "" {
+	if req.Service == "" {
+		req.Service = "flacit"
+	}
+	if req.Service != "flacit" {
 		return DownloadResponse{
 			Success: false,
-			Error:   "Spotify ID is required for Qobuz",
-		}, fmt.Errorf("spotify ID is required for Qobuz")
-	}
-
-	if req.Service == "" {
-		req.Service = "tidal"
+			Error:   fmt.Sprintf("unknown service: %q (only the Telegram gateway is supported)", req.Service),
+		}, fmt.Errorf("unknown service: %s", req.Service)
 	}
 
 	// Fill in artwork the caller didn't supply.
@@ -680,7 +610,6 @@ func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 		backend.AddToQueue(itemID, req.TrackName, req.ArtistName, req.AlbumName, req.SpotifyID)
 	}
 
-	backend.SetAllowLossyFallback(req.AllowLossyFallback)
 	backend.SetDownloading(true)
 	backend.StartDownloadItem(itemID)
 	defer backend.SetDownloading(false)
@@ -798,87 +727,25 @@ func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 	}
 
 	lyricsChan := make(chan string, 1)
-	isrcChan := make(chan string, 1)
-
-	if req.SpotifyID != "" {
-		if req.EmbedLyrics {
-			go func() {
-				client := backend.NewLyricsClient()
-				resp, _, err := client.FetchLyricsAllSources(req.SpotifyID, req.TrackName, req.ArtistName, req.AlbumName, req.Duration)
-				if err == nil && resp != nil && len(resp.Lines) > 0 {
-					lrc := client.ConvertToLRC(resp, req.TrackName, req.ArtistName)
-					lyricsChan <- lrc
-				} else {
-					lyricsChan <- ""
-				}
-			}()
-		} else {
-			close(lyricsChan)
-		}
-
-		if req.Service == "qobuz" {
-			go func() {
-				client := backend.NewSongLinkClient()
-				isrc, err := client.GetISRCDirect(req.SpotifyID)
-				if err != nil {
-					fmt.Printf("Warning: failed to resolve ISRC for Qobuz: %v\n", err)
-				}
-				isrcChan <- isrc
-			}()
-		} else {
-			close(isrcChan)
-		}
+	if req.SpotifyID != "" && req.EmbedLyrics {
+		go func() {
+			client := backend.NewLyricsClient()
+			resp, _, err := client.FetchLyricsAllSources(req.SpotifyID, req.TrackName, req.ArtistName, req.AlbumName, req.Duration)
+			if err == nil && resp != nil && len(resp.Lines) > 0 {
+				lrc := client.ConvertToLRC(resp, req.TrackName, req.ArtistName)
+				lyricsChan <- lrc
+			} else {
+				lyricsChan <- ""
+			}
+		}()
 	} else {
 		close(lyricsChan)
-		close(isrcChan)
 	}
 
-	switch req.Service {
-	case "amazon":
-
-		downloader := backend.NewAmazonDownloader()
-		if req.ServiceURL != "" {
-			filename, err = downloader.DownloadByURL(req.ServiceURL, req.OutputDir, req.AudioFormat, req.FilenameFormat, req.PlaylistName, req.PlaylistOwner, req.TrackNumber, req.Position, req.TrackName, req.ArtistName, req.AlbumName, req.AlbumArtist, req.ReleaseDate, req.CoverURL, req.SpotifyTrackNumber, req.SpotifyDiscNumber, req.SpotifyTotalTracks, req.EmbedMaxQualityCover, req.SpotifyTotalDiscs, req.Copyright, req.Publisher, req.Composer, metadataSeparator, req.ISRC, spotifyURL, req.AllowFallback, req.AllowAtmosFallback, req.AtmosFallbackQuality, req.UseFirstArtistOnly, req.UseSingleGenre, req.EmbedGenre)
-		} else {
-			filename, err = downloader.DownloadBySpotifyID(req.SpotifyID, req.OutputDir, req.AudioFormat, req.FilenameFormat, req.PlaylistName, req.PlaylistOwner, req.TrackNumber, req.Position, req.TrackName, req.ArtistName, req.AlbumName, req.AlbumArtist, req.ReleaseDate, req.CoverURL, req.SpotifyTrackNumber, req.SpotifyDiscNumber, req.SpotifyTotalTracks, req.EmbedMaxQualityCover, req.SpotifyTotalDiscs, req.Copyright, req.Publisher, req.Composer, metadataSeparator, req.ISRC, spotifyURL, req.AllowFallback, req.AllowAtmosFallback, req.AtmosFallbackQuality, req.UseFirstArtistOnly, req.UseSingleGenre, req.EmbedGenre)
-		}
-		sourceURL = downloader.SourceURL
-
-	case "tidal":
-		downloader := backend.NewTidalDownloader(req.TidalAPIURL)
-		if req.ServiceURL != "" {
-			filename, err = downloader.DownloadByURL(req.ServiceURL, req.OutputDir, req.AudioFormat, req.FilenameFormat, req.TrackNumber, req.Position, req.TrackName, req.ArtistName, req.AlbumName, req.AlbumArtist, req.ReleaseDate, req.UseAlbumTrackNumber, req.CoverURL, req.EmbedMaxQualityCover, req.SpotifyTrackNumber, req.SpotifyDiscNumber, req.SpotifyTotalTracks, req.SpotifyTotalDiscs, req.Copyright, req.Publisher, req.Composer, metadataSeparator, req.ISRC, spotifyURL, req.AllowFallback, req.AllowAtmosFallback, req.AtmosFallbackQuality, req.UseFirstArtistOnly, req.UseSingleGenre, req.EmbedGenre)
-		} else {
-			filename, err = downloader.Download(req.SpotifyID, req.OutputDir, req.AudioFormat, req.FilenameFormat, req.TrackNumber, req.Position, req.TrackName, req.ArtistName, req.AlbumName, req.AlbumArtist, req.ReleaseDate, req.UseAlbumTrackNumber, req.CoverURL, req.EmbedMaxQualityCover, req.SpotifyTrackNumber, req.SpotifyDiscNumber, req.SpotifyTotalTracks, req.SpotifyTotalDiscs, req.Copyright, req.Publisher, req.Composer, metadataSeparator, req.ISRC, spotifyURL, req.AllowFallback, req.AllowAtmosFallback, req.AtmosFallbackQuality, req.UseFirstArtistOnly, req.UseSingleGenre, req.EmbedGenre)
-		}
-		sourceURL = downloader.SourceURL
-
-	case "qobuz":
-
-		isrc := strings.TrimSpace(req.ISRC)
-		if isrc == "" {
-			fmt.Println("Waiting for ISRC (Qobuz dependency)...")
-			isrc = <-isrcChan
-		}
-		downloader := backend.NewQobuzDownloader()
-		qobuzAPI := strings.TrimRight(strings.TrimSpace(req.QobuzAPIURL), "/")
-		if strings.HasPrefix(qobuzAPI, "https://") || strings.HasPrefix(qobuzAPI, "http://") {
-			downloader.SetCustomAPIURL(req.QobuzAPIURL)
-		}
-		quality := req.AudioFormat
-		if quality == "" {
-			quality = "6"
-		}
-		filename, err = downloader.DownloadTrackWithISRC(isrc, req.OutputDir, quality, req.FilenameFormat, req.TrackNumber, req.Position, req.TrackName, req.ArtistName, req.AlbumName, req.AlbumArtist, req.ReleaseDate, req.UseAlbumTrackNumber, req.CoverURL, req.EmbedMaxQualityCover, req.SpotifyTrackNumber, req.SpotifyDiscNumber, req.SpotifyTotalTracks, req.SpotifyTotalDiscs, req.Copyright, req.Publisher, req.Composer, metadataSeparator, spotifyURL, req.AllowFallback, req.UseFirstArtistOnly, req.UseSingleGenre, req.EmbedGenre)
-		sourceURL = downloader.SourceURL
-		sourceLabel = downloader.SourceLabel
-
-	default:
-		return DownloadResponse{
-			Success: false,
-			Error:   fmt.Sprintf("Unknown service: %s", req.Service),
-		}, fmt.Errorf("unknown service: %s", req.Service)
-	}
+	downloader := backend.NewFlacItDownloader(backend.GetFlacItGatewayURL())
+	filename, err = downloader.Download(req.SpotifyID, req.OutputDir, req.FilenameFormat, req.TrackNumber, req.Position, req.TrackName, req.ArtistName, req.AlbumName, req.AlbumArtist, req.ReleaseDate, req.UseAlbumTrackNumber, req.CoverURL, req.EmbedMaxQualityCover, req.SpotifyTrackNumber, req.SpotifyDiscNumber, req.SpotifyTotalTracks, req.SpotifyTotalDiscs, req.Copyright, req.Publisher, req.Composer, metadataSeparator, req.ISRC, spotifyURL, req.UseFirstArtistOnly, req.UseSingleGenre, req.EmbedGenre)
+	sourceURL = downloader.SourceURL
+	sourceLabel = downloader.SourceLabel
 
 	if err != nil {
 		if backend.IsDownloadCancelledError(err) {
@@ -1150,6 +1017,32 @@ func (a *App) GetDefaults() map[string]string {
 	}
 }
 
+// GetFlacItStatus proxies flacit-gateway's health endpoint so the web UI and
+// Harmony can show Telegram login state without needing their own gateway
+// address logic. Never returns an RPC error — a down/misconfigured gateway is
+// data to render ("not logged in", "unreachable"), not an exceptional failure.
+func (a *App) GetFlacItStatus() map[string]interface{} {
+	gatewayURL := backend.GetFlacItGatewayURL()
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Get(gatewayURL + "/")
+	if err != nil {
+		return map[string]interface{}{"ok": false, "error": err.Error(), "gateway_url": gatewayURL}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	if err != nil {
+		return map[string]interface{}{"ok": false, "error": err.Error(), "gateway_url": gatewayURL}
+	}
+
+	var status map[string]interface{}
+	if err := json.Unmarshal(body, &status); err != nil {
+		return map[string]interface{}{"ok": false, "error": "invalid gateway response", "gateway_url": gatewayURL}
+	}
+	status["gateway_url"] = gatewayURL
+	return status
+}
+
 func (a *App) GetDownloadProgress() backend.ProgressInfo {
 	return backend.GetDownloadProgress()
 }
@@ -1238,12 +1131,6 @@ func (a *App) ExportFailedDownloads() (string, error) {
 func (a *App) CheckAPIStatus(apiType string, apiURL string) bool {
 	isOnline, err := runWithTimeout(checkOperationTimeout, func() (bool, error) {
 		switch apiType {
-		case "tidal":
-			return checkGroupedAPIStatus("tidal", buildTidalStatusCheckURLs(apiURL)), nil
-		case "qobuz", "qbz":
-			return checkGroupedAPIStatus("qobuz", buildQobuzStatusCheckURLs(apiURL)), nil
-		case "amazon":
-			return checkGroupedAPIStatus("amazon", buildAmazonStatusCheckURLs(apiURL)), nil
 		case "lrclib":
 			return checkGroupedAPIStatus("lrclib", buildLRCLIBStatusCheckURLs(apiURL)), nil
 		case "musicbrainz":
@@ -1270,12 +1157,6 @@ func (a *App) CheckAPIStatus(apiType string, apiURL string) bool {
 func (a *App) CheckAPIStatusReport(apiType string, apiURL string) APIStatusReport {
 	report, err := runWithTimeout(checkOperationTimeout, func() (APIStatusReport, error) {
 		switch apiType {
-		case "tidal":
-			return buildGroupedAPIStatusReport("tidal", buildTidalStatusCheckURLs(apiURL), false), nil
-		case "qobuz", "qbz":
-			return buildGroupedAPIStatusReport("qobuz", buildQobuzStatusCheckURLs(apiURL), false), nil
-		case "amazon":
-			return buildGroupedAPIStatusReport("amazon", buildAmazonStatusCheckURLs(apiURL), false), nil
 		case "lrclib":
 			return buildGroupedAPIStatusReport("lrclib", buildLRCLIBStatusCheckURLs(apiURL), false), nil
 		case "musicbrainz":
@@ -1288,7 +1169,7 @@ func (a *App) CheckAPIStatusReport(apiType string, apiURL string) APIStatusRepor
 		return APIStatusReport{
 			Type:       apiType,
 			Online:     false,
-			RequireAll: apiType == "qobuz" || apiType == "qbz",
+			RequireAll: false,
 			Details: []APIStatusTargetResult{{
 				Target:  strings.TrimSpace(apiURL),
 				Label:   describeAPIStatusTarget(apiType, apiURL),
@@ -1358,168 +1239,6 @@ func (a *App) FetchSpotiFLACStatusPayload(kind string) (map[string]string, error
 		return fetchSpotiFLACStatusPayload(statusURL)
 	})
 }
-func (a *App) CheckCustomTidalAPI(apiURL string) bool {
-	type tidalProbeResponse struct {
-		Version string `json:"version"`
-		Data    struct {
-			TrackID           int64  `json:"trackId"`
-			AssetPresentation string `json:"assetPresentation"`
-			ManifestMimeType  string `json:"manifestMimeType"`
-			Manifest          string `json:"manifest"`
-		} `json:"data"`
-	}
-	type tidalLegacyResponse struct {
-		OriginalTrackURL string `json:"OriginalTrackUrl"`
-	}
-
-	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if apiURL == "" {
-		return false
-	}
-
-	const probeTrackID int64 = 441821360
-	probeURL := fmt.Sprintf("%s/track/?id=%d&quality=LOSSLESS", apiURL, probeTrackID)
-
-	req, err := http.NewRequest(http.MethodGet, probeURL, nil)
-	if err != nil {
-		fmt.Printf("[CheckCustomTidalAPI] Failed to create request for %s: %v\n", apiURL, err)
-		return false
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "application/json")
-
-	client := &http.Client{Timeout: 12 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("[CheckCustomTidalAPI] Probe request failed for %s: %v\n", apiURL, err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		fmt.Printf("[CheckCustomTidalAPI] Failed to read probe response for %s: %v\n", apiURL, err)
-		return false
-	}
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("[CheckCustomTidalAPI] Probe returned status %d for %s: %s\n", resp.StatusCode, apiURL, previewResponseBody(body, 200))
-		return false
-	}
-
-	var probe tidalProbeResponse
-	if err := json.Unmarshal(body, &probe); err == nil {
-		assetPresentation := strings.ToUpper(strings.TrimSpace(probe.Data.AssetPresentation))
-		switch assetPresentation {
-		case "FULL":
-			if strings.TrimSpace(probe.Data.Manifest) != "" {
-				fmt.Printf("[CheckCustomTidalAPI] Tidal API is ONLINE for %s (assetPresentation=%s)\n", apiURL, assetPresentation)
-				return true
-			}
-			fmt.Printf("[CheckCustomTidalAPI] Probe returned FULL without manifest for %s\n", apiURL)
-			return false
-		case "PREVIEW":
-			fmt.Printf("[CheckCustomTidalAPI] Probe returned PREVIEW for %s\n", apiURL)
-			return false
-		case "":
-
-		default:
-			fmt.Printf("[CheckCustomTidalAPI] Probe returned unsupported assetPresentation=%s for %s\n", assetPresentation, apiURL)
-			return false
-		}
-	}
-
-	var legacy []tidalLegacyResponse
-	if err := json.Unmarshal(body, &legacy); err == nil {
-		for _, item := range legacy {
-			if strings.TrimSpace(item.OriginalTrackURL) != "" {
-				fmt.Printf("[CheckCustomTidalAPI] Tidal API is ONLINE for %s (legacy response)\n", apiURL)
-				return true
-			}
-		}
-	}
-
-	fmt.Printf("[CheckCustomTidalAPI] Probe response was unusable for %s: %s\n", apiURL, previewResponseBody(body, 200))
-	return false
-}
-
-func (a *App) CheckCustomQobuzAPI(apiURL string) bool {
-	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if !strings.HasPrefix(apiURL, "https://") && !strings.HasPrefix(apiURL, "http://") {
-		return false
-	}
-
-	const probeTrackID int64 = 64868955
-	probeURL := fmt.Sprintf("%s/api/download-music?track_id=%d&quality=27", apiURL, probeTrackID)
-
-	req, err := http.NewRequest(http.MethodGet, probeURL, nil)
-	if err != nil {
-		fmt.Printf("[CheckCustomQobuzAPI] Failed to create request for %s: %v\n", apiURL, err)
-		return false
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "application/json")
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Printf("[CheckCustomQobuzAPI] Probe request failed for %s: %v\n", apiURL, err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		fmt.Printf("[CheckCustomQobuzAPI] Failed to read probe response for %s: %v\n", apiURL, err)
-		return false
-	}
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("[CheckCustomQobuzAPI] Probe returned status %d for %s: %s\n", resp.StatusCode, apiURL, previewResponseBody(body, 200))
-		return false
-	}
-
-	var probe struct {
-		Success bool `json:"success"`
-		Data    struct {
-			URL string `json:"url"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &probe); err != nil {
-		fmt.Printf("[CheckCustomQobuzAPI] Failed to decode probe response for %s: %v\n", apiURL, err)
-		return false
-	}
-	if probe.Success && strings.TrimSpace(probe.Data.URL) != "" {
-		fmt.Printf("[CheckCustomQobuzAPI] Qobuz instance is ONLINE for %s\n", apiURL)
-		return true
-	}
-
-	fmt.Printf("[CheckCustomQobuzAPI] Probe response was unusable for %s: %s\n", apiURL, previewResponseBody(body, 200))
-	return false
-}
-
-func buildTidalStatusCheckURLs(apiURL string) []string {
-	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if apiURL == "" {
-		return nil
-	}
-	return []string{fmt.Sprintf("%s/track/?id=441821360&quality=HI_RES_LOSSLESS", apiURL)}
-}
-
-func buildQobuzStatusCheckURLs(apiURL string) []string {
-	if trimmed := strings.TrimSpace(apiURL); trimmed != "" {
-		return []string{trimmed}
-	}
-
-	return []string{backend.GetQobuzCommunityHealthURL()}
-}
-
-func buildAmazonStatusCheckURLs(apiURL string) []string {
-	baseURL := strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if baseURL == "" {
-		baseURL = backend.GetAmazonMusicAPIBaseURL()
-	}
-	return []string{fmt.Sprintf("%s/status", baseURL)}
-}
-
 func buildLRCLIBStatusCheckURLs(apiURL string) []string {
 	baseURL := strings.TrimRight(strings.TrimSpace(apiURL), "/")
 	if baseURL == "" {
@@ -1652,7 +1371,6 @@ func checkSingleAPIStatusDetailed(apiType string, checkURL string) APIStatusTarg
 	}
 
 	client := &http.Client{Timeout: 4 * time.Second}
-	trimmedType := strings.TrimSpace(strings.ToLower(apiType))
 
 	req, err := backend.NewRequestWithDefaultHeaders(http.MethodGet, checkURL, nil)
 	if err != nil {
@@ -1673,28 +1391,13 @@ func checkSingleAPIStatusDetailed(apiType string, checkURL string) APIStatusTarg
 		return result
 	}
 
-	switch trimmedType {
-	case "amazon":
-		if resp.StatusCode == http.StatusOK && strings.Contains(string(body), `"amazonMusic":"up"`) {
-			result.Online = true
-			result.Message = `amazonMusic="up"`
-			return result
-		}
-		if resp.StatusCode != http.StatusOK {
-			result.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, previewResponseBody(body, 160))
-			return result
-		}
-		result.Message = `amazonMusic was not reported as "up"`
-		return result
-	default:
-		if resp.StatusCode == http.StatusOK {
-			result.Online = true
-			result.Message = fmt.Sprintf("HTTP %d", resp.StatusCode)
-			return result
-		}
-		result.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, previewResponseBody(body, 160))
+	if resp.StatusCode == http.StatusOK {
+		result.Online = true
+		result.Message = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		return result
 	}
+	result.Message = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, previewResponseBody(body, 160))
+	return result
 }
 
 func checkSingleAPIStatus(apiType string, checkURL string) bool {
@@ -1717,8 +1420,6 @@ func checkSingleAPIStatus(apiType string, checkURL string) bool {
 
 	statusCode := resp.StatusCode
 	switch apiType {
-	case "amazon":
-		return statusCode == http.StatusOK && strings.Contains(string(body), `"amazonMusic":"up"`)
 	case "lrclib":
 		return statusCode == http.StatusOK && containsLRCLIBResults(body)
 	case "musicbrainz":
@@ -2034,27 +1735,6 @@ func (a *App) DownloadAvatar(req AvatarDownloadRequest) (backend.AvatarDownloadR
 	}
 
 	return *resp, nil
-}
-
-func (a *App) CheckTrackAvailability(spotifyTrackID string) (string, error) {
-	if spotifyTrackID == "" {
-		return "", fmt.Errorf("spotify track ID is required")
-	}
-
-	return runWithTimeout(checkOperationTimeout, func() (string, error) {
-		client := backend.NewSongLinkClient()
-		availability, err := client.CheckTrackAvailability(spotifyTrackID)
-		if err != nil {
-			return "", err
-		}
-
-		jsonData, err := json.Marshal(availability)
-		if err != nil {
-			return "", fmt.Errorf("failed to encode response: %v", err)
-		}
-
-		return string(jsonData), nil
-	})
 }
 
 func (a *App) IsFFmpegInstalled() (bool, error) {

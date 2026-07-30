@@ -3,7 +3,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY gateway.py .
-ENV PORT=8081 SESSION_FILE=/config/tidal-session.json
+ENV PORT=8082 SESSION_FILE=/config/telegram-session.session
 VOLUME ["/config"]
-EXPOSE 8081
+EXPOSE 8082
 CMD ["python", "gateway.py"]

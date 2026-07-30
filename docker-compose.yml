@@ -12,16 +12,18 @@ services:
       - ADDR=:8080
       - DOWNLOAD_DIR=/downloads
       - CONFIG_DIR=/config
+      - FLACIT_GATEWAY_URL=http://172.17.0.1:8082
     restart: unless-stopped
 
-  # Optional: your own Tidal gateway so downloads use YOUR subscription instead
-  # of the shared community servers (no rate limits / Cloudflare). Remove this
-  # block if you don't want it. Requires a one-time login (see SETUP.md).
-  tidal-gateway:
-    image: ghcr.io/akvaithi/tidal-gateway:latest
-    container_name: tidal-gateway
+  # SpotiFLAC's only download source: drives @deezload2bot over Telegram to
+  # fetch lossless FLAC. Needs an authenticated Telethon session at
+  # /DATA/AppData/flacit-gateway/telegram-session.session — see
+  # flacit-gateway/README.md for the one-time login/bootstrap.
+  flacit-gateway:
+    image: ghcr.io/akvaithi/flacit-gateway:latest
+    container_name: flacit-gateway
     ports:
-      - "8081:8081"
+      - "8082:8082"
     volumes:
-      - /DATA/AppData/tidal-gateway:/config
+      - /DATA/AppData/flacit-gateway:/config
     restart: unless-stopped

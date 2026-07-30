@@ -3,7 +3,8 @@
 Two prebuilt images, pulled straight from GitHub Container Registry:
 
 - `ghcr.io/akvaithi/spotiflac:latest` — the web app
-- `ghcr.io/akvaithi/tidal-gateway:latest` — optional: your own Tidal account gateway
+- `ghcr.io/akvaithi/flacit-gateway:latest` — the Telegram gateway (required; this
+  is SpotiFLAC's only download source)
 
 No building required. Personal use only.
 
@@ -16,8 +17,8 @@ each public once, in your browser:
 
 1. https://github.com/users/akvaithi/packages/container/spotiflac/settings
    → **Danger Zone → Change visibility → Public** → confirm (`spotiflac`).
-2. https://github.com/users/akvaithi/packages/container/tidal-gateway/settings
-   → **Danger Zone → Change visibility → Public** → confirm (`tidal-gateway`).
+2. https://github.com/users/akvaithi/packages/container/flacit-gateway/settings
+   → **Danger Zone → Change visibility → Public** → confirm (`flacit-gateway`).
 
 (If you skip this, you must run `docker login ghcr.io -u akvaithi` on the server
 first, with a token that has `read:packages`.)
@@ -44,31 +45,58 @@ services:
       - "8080:8080"
     volumes:
       - /DATA/Media/Music:/downloads        # where FLACs land
-      - /DATA/AppData/spotiflac:/config      # settings/history/session (keep!)
+      - /DATA/AppData/spotiflac:/config      # settings/history/index (keep!)
     environment:
       - ADDR=:8080
       - DOWNLOAD_DIR=/downloads
       - CONFIG_DIR=/config
+      - FLACIT_GATEWAY_URL=http://172.17.0.1:8082
     restart: unless-stopped
 
-  tidal-gateway:
-    image: ghcr.io/akvaithi/tidal-gateway:latest
-    container_name: tidal-gateway
+  flacit-gateway:
+    image: ghcr.io/akvaithi/flacit-gateway:latest
+    container_name: flacit-gateway
     ports:
-      - "8081:8081"
+      - "8082:8082"
     volumes:
-      - /DATA/AppData/tidal-gateway:/config   # stores your Tidal login token
+      - /DATA/AppData/flacit-gateway:/config   # stores the Telegram session
     restart: unless-stopped
 ```
 
 Save (`Ctrl+O`, `Enter`, `Ctrl+X`).
 
-> Don't want the gateway yet? Delete the whole `tidal-gateway:` block and skip
-> Steps 3–4. You'll use the community servers (subject to their rate limits).
+---
+
+## Step 2 — Bootstrap the Telegram session (before first start)
+
+`flacit-gateway` needs an authenticated Telethon session — and a fresh login
+alone isn't enough, because the account also has to have manually started
+`@deezload2bot` and joined its channel once, or every download times out.
+
+**If you already have a working session** (e.g. from
+[FlacIt](https://github.com/BunnY-exe/FlacIt) — `~/.newsong_session.session`),
+copy it onto the box before starting the container:
+
+```bash
+mkdir -p /DATA/AppData/flacit-gateway
+scp ~/.newsong_session.session <user>@<zimaos-ip>:/DATA/AppData/flacit-gateway/telegram-session.session
+```
+
+**Starting from scratch instead?** Skip ahead to Step 3, then:
+
+1. Open **http://<your-zimaos-ip>:8082/login**, enter the phone number, the
+   code sent to Telegram, and a 2FA password if you have one set.
+2. Open Telegram yourself with that account, search **@deezload2bot**, press
+   **Start**, and join its channel when it asks. This is the one step the
+   gateway can't automate.
+
+Either way, on first successful connection the gateway automatically switches
+the bot's output quality to FLAC (it defaults to MP3 320kbps) — nothing to do
+there.
 
 ---
 
-## Step 2 — Start it
+## Step 3 — Start it
 
 ```bash
 docker compose pull
@@ -82,49 +110,23 @@ Check both are running:
 docker compose ps
 ```
 
----
-
-## Step 3 — Log in to the Tidal gateway (one time, hi-res)
-
-The gateway uses Tidal's PKCE login, which is what unlocks **lossless / hi-res FLAC**
-(the simpler device login is capped at AAC).
-
-1. Open **http://<your-zimaos-ip>:8081/login** in a browser.
-2. Click **"Click here to log in to Tidal"**, sign in with your subscription.
-3. You'll be redirected to an **"Oops" / not-found page** — that's expected.
-4. **Copy that page's full URL** (starts with `https://tidal.com/android/login/auth?code=...`)
-   and paste it into the box, then **Complete login**.
-
-You should see "Logged in with hi-res access." The token is saved to `/config`
-(the `tidal-gateway` volume) and auto-refreshed — one time only.
+Check the gateway sees your session:
+```bash
+curl -s http://<your-zimaos-ip>:8082/
+# {"ok":true,"logged_in":true,"me":"yourusername","flac_quality_set":true,"active_job":null}
+```
 
 ---
 
-## Step 4 — Point SpotiFLAC at your gateway
-
-1. In SpotiFLAC → **Settings** tab.
-2. Under **Your own gateway**, set **Custom Tidal API URL** to:
-   ```
-   http://<your-zimaos-ip>:8081
-   ```
-3. Click **Test** → it should say **“online (returns a FULL manifest)”**.
-4. Click **Save gateway URLs**.
-
-Now Tidal downloads go through your account — no community servers, no Cloudflare
-check, no rate limits.
-
----
-
-## Step 5 — Download something
+## Step 4 — Download something
 
 1. **Get** tab → paste a Spotify track/album/playlist URL (or switch to Search).
-2. Pick **Service = Tidal**, choose format, click **Fetch**, then **Download**.
+2. Pick a **Filename** format, click **Fetch**, then **Download**.
 3. Watch the **Queue** tab for progress. Files appear under **Files** and in your
    `/downloads` share.
 
-If you did NOT set up the gateway, a download may show a **Verification required**
-modal (community Cloudflare check) or a **rate-limit banner** — both are normal;
-follow the modal, or wait for the retry.
+If `logged_in` was false in Step 3, downloads will fail with a "not logged in"
+error — go back to Step 2.
 
 ---
 
@@ -135,13 +137,18 @@ cd ~/spotiflac
 docker compose pull && docker compose up -d
 ```
 
+**Re-check the gateway URL after every update.** Both containers run
+`network_mode: bridge`, so their IPs can shift on recreate — `172.17.0.1` (the
+docker0 host gateway) is the one stable address; a container IP saved
+elsewhere will silently break.
+
 ## Common issues
 
 | Symptom | Fix |
 |---|---|
 | `pull access denied` / `not found` | Package still private — do Step 0. |
-| Gateway **Test** fails | Check `docker compose logs tidal-gateway`; make sure you completed the `link.tidal.com` login. |
-| Stuck on “downloading” with a yellow banner | Community server rate limit/cooldown — wait, or use the gateway. |
-| Queue won’t start (“already downloading”) | Click **Stop** on the Queue tab, or `docker restart spotiflac`. |
-| Hi-Res not working | Needs HiFi Plus on your Tidal account; otherwise it serves lossless. |
-| Re-login to Tidal | Delete the `tidal-session.json` in the gateway’s `/config` volume, then `docker restart tidal-gateway`. |
+| Downloads fail immediately, "not logged in" | `flacit-gateway`'s session is missing or expired — redo Step 2. |
+| Stuck "resolving" / times out waiting for a FLAC | The account hasn't started `@deezload2bot` / joined its channel — see Step 2's second bullet. Or the track just isn't on Deezer. |
+| Queue won't start ("already downloading") | Click **Stop** on the Queue tab, or `docker restart spotiflac`. |
+| Only 16-bit/44.1kHz FLAC | Expected — Deezer via the bot doesn't offer hi-res; there's no fallback tier for it. |
+| Re-login to Telegram | Delete `telegram-session.session` in the gateway's `/config` volume, then `docker restart flacit-gateway` and redo Step 2. |

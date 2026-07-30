@@ -1,0 +1,612 @@
+"""
+Minimal self-hosted Telegram gateway for SpotiFLAC — the FlacIt pipeline.
+
+Drives @deezload2bot over MTProto (Telethon) to fetch lossless FLAC sourced from
+Deezer, and downloads the resulting document with 16 parallel exported senders
+against the file's own DC — the same technique as FlacIt's
+`ultra_parallel_download`, at 3.5–4.6 MB/s instead of the ~0.3 MB/s a single
+MTProto stream is throttled to.
+
+SpotiFLAC's Go downloader talks to this over a small job API:
+
+    POST   /fetch            {"url": "<spotify or deezer track url>"} -> {job_id, state}
+    GET    /fetch/<job_id>    -> {state, filename, size, downloaded, speed_mbps, error}
+    GET    /fetch/<job_id>/file  -> streams the finished FLAC
+    DELETE /fetch/<job_id>    -> drops the temp file
+
+A job API rather than one blocking request because bot delivery can take tens of
+seconds and the parallel download completes out of order — nothing here is safe
+to serve synchronously from a single HTTP request/response.
+
+Fetches are processed **one at a time**, in the order received. The bot chat is a
+single stateful conversation — a reply is matched by "a new inbound message
+carrying a FLAC, after the id recorded before sending" — so two concurrent fetches
+would race for the same reply. SpotiFLAC's own download worker is already serial,
+so this costs nothing in practice.
+
+Login is a one-time browser step at http://<this-host>:8082/login — but this is
+meant to be bootstrapped by copying an already-authenticated Telethon session into
+place (see the SpotiFLAC deploy notes), because a fresh session also needs a human
+to open Telegram, start @deezload2bot, and join its channel once — /login alone
+does not do that.
+
+Personal use only.
+"""
+import asyncio
+import math
+import os
+import re
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+from flask import Flask, jsonify, request, send_file
+from telethon import TelegramClient, errors, functions, types
+from telethon.tl.types import DocumentAttributeFilename, ReplyInlineMarkup
+
+API_ID = int(os.environ.get("TG_API_ID", "2040"))
+API_HASH = os.environ.get("TG_API_HASH", "b18441a1ff607e10a989891a5462e627")
+BOT = os.environ.get("TG_BOT", "deezload2bot")
+
+SESSION_FILE = os.environ.get("SESSION_FILE", "/config/telegram-session.session")
+_SESSION_NAME = SESSION_FILE[:-len(".session")] if SESSION_FILE.endswith(".session") else SESSION_FILE
+CONFIG_DIR = os.path.dirname(SESSION_FILE) or "/config"
+JOBS_DIR = os.path.join(CONFIG_DIR, "jobs")
+FLAC_QUALITY_FLAG = os.path.join(CONFIG_DIR, ".flac_quality_set")
+
+FLAC_TIMEOUT = 120          # total seconds to wait for the bot's FLAC document
+FLAC_RETRY_AFTER = 35       # resend the link once if nothing has arrived by then
+JOB_REAP_AFTER = 600        # drop finished jobs (and their temp files) after this
+DOWNLOAD_CONNECTIONS = 16
+PART_SIZE = 512 * 1024
+
+os.makedirs(JOBS_DIR, exist_ok=True)
+
+app = Flask(__name__)
+
+# ---------------------------------------------------------------- event loop
+
+_loop = asyncio.new_event_loop()
+
+
+def _run_loop():
+    asyncio.set_event_loop(_loop)
+    _loop.run_forever()
+
+
+threading.Thread(target=_run_loop, daemon=True).start()
+
+
+def _await(coro, timeout=None):
+    """Bridge a coroutine from Flask's (sync) request thread onto the client's
+    dedicated event-loop thread, and block for the result."""
+    return asyncio.run_coroutine_threadsafe(coro, _loop).result(timeout)
+
+
+client = None
+
+
+client = None
+_fetch_queue = None
+
+
+async def _create_client():
+    # Both must be constructed on the loop thread, not the main thread. On
+    # Python < 3.10, asyncio.Queue() binds to whatever loop get_event_loop()
+    # returns *at construction time* — building it on the main thread ties it
+    # to a loop that's never running, so `.get()` blocks forever with no error.
+    # TelegramClient has the same trap for a different reason: constructing it
+    # on the main thread (even while passing `loop=_loop` to steer it) leaves
+    # its internals split across two event-loop contexts, and `connect()` then
+    # hangs forever, also silently.
+    global client, _fetch_queue
+    client = TelegramClient(_SESSION_NAME, API_ID, API_HASH)
+    _fetch_queue = asyncio.Queue()
+
+
+_await(_create_client())
+
+# ---------------------------------------------------------------- job state
+
+jobs = {}
+jobs_lock = threading.Lock()
+_active_job_id = None
+
+# Job ids whose caller has given up on them (deleted while still in flight).
+# The fetches are processed one at a time, so a fetch stuck waiting on a bad
+# link would otherwise block every job behind it for up to FLAC_TIMEOUT with
+# no way to skip it — this is checked at each wait/poll point so an abandoned
+# job gets dropped instead. Plain set(), no lock: add/discard/contains on a
+# set of hashable items is atomic under the GIL for our purposes here.
+_cancelled_jobs = set()
+
+
+class _JobCancelled(Exception):
+    pass
+
+
+def _check_not_cancelled(job_id):
+    if job_id in _cancelled_jobs:
+        raise _JobCancelled(job_id)
+
+
+def _new_job(url):
+    job_id = os.urandom(6).hex()
+    with jobs_lock:
+        jobs[job_id] = {
+            "id": job_id,
+            "url": url,
+            "state": "queued",
+            "filename": None,
+            "size": 0,
+            "downloaded": 0,
+            "speed_mbps": 0.0,
+            "error": None,
+            "path": None,
+            "created": time.time(),
+        }
+    return job_id
+
+
+def _job_view(job):
+    return {k: v for k, v in job.items() if k not in ("path", "url", "created")}
+
+
+def _is_flac(msg):
+    """Mime and filename check — the bot silently falls back to MP3 320kbps if
+    quality wasn't set, and this is what catches that instead of filing a lossy
+    file under a .flac name."""
+    if msg.audio:
+        return True
+    if msg.document:
+        mime = getattr(msg.document, "mime_type", "") or ""
+        if "flac" in mime:
+            return True
+        for attr in getattr(msg.document, "attributes", []):
+            fn = getattr(attr, "file_name", "") or ""
+            if fn.lower().endswith(".flac"):
+                return True
+    return False
+
+
+def _safe_filename(name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:200] or "track.flac"
+
+
+# ---------------------------------------------------------------- FLAC quality
+
+async def _ensure_flac_quality():
+    """Navigate /settings to lock @deezload2bot's output to FLAC.
+
+    Ported from FlacIt's set_flac_quality.py / newsong_dl.py. Two traps recorded
+    there and preserved here: clicking "Audio Quality" *edits* the settings
+    message rather than sending a new one (re-fetch by id, don't wait for a new
+    message), and message filtering must be id-based, not date-based — Telegram
+    timestamps are whole seconds and can spuriously match datetime.now().
+    """
+    if os.path.exists(FLAC_QUALITY_FLAG):
+        return
+    try:
+        last_id = 0
+        async for msg in client.iter_messages(BOT, limit=1):
+            last_id = msg.id
+        await client.send_message(BOT, "/settings")
+
+        settings_msg = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            async for msg in client.iter_messages(BOT, limit=5):
+                if msg.id <= last_id:
+                    break
+                if msg.out:
+                    continue
+                if msg.reply_markup and isinstance(msg.reply_markup, ReplyInlineMarkup):
+                    settings_msg = msg
+                    break
+            if settings_msg:
+                break
+            await asyncio.sleep(1)
+
+        if not settings_msg:
+            print("flacit-gateway: could not reach @deezload2bot settings — "
+                  "set quality to FLAC manually", flush=True)
+            return
+
+        clicked = False
+        for row in settings_msg.reply_markup.rows:
+            for btn in row.buttons:
+                if "quality" in (btn.text or "").lower() or "audio" in (btn.text or "").lower():
+                    await settings_msg.click(text=btn.text)
+                    clicked = True
+                    break
+            if clicked:
+                break
+        if not clicked:
+            print("flacit-gateway: no Audio Quality button in @deezload2bot settings", flush=True)
+            return
+
+        await asyncio.sleep(2)
+        updated = await client.get_messages(BOT, ids=[settings_msg.id])
+        updated_msg = updated[0] if updated else None
+        if updated_msg and updated_msg.reply_markup:
+            for row in updated_msg.reply_markup.rows:
+                for btn in row.buttons:
+                    if "flac" in (btn.text or "").lower():
+                        await updated_msg.click(text=btn.text)
+                        open(FLAC_QUALITY_FLAG, "w").close()
+                        print("flacit-gateway: @deezload2bot quality set to FLAC", flush=True)
+                        return
+        print("flacit-gateway: no FLAC option in the Audio Quality submenu", flush=True)
+    except Exception as e:  # noqa
+        print(f"flacit-gateway: ensure_flac_quality failed: {e}", flush=True)
+
+
+# ---------------------------------------------------------------- download
+
+async def _parallel_download(document, save_path, job_id, connection_count=DOWNLOAD_CONNECTIONS):
+    """16 exported senders on the document's own DC, each pulling 512KB parts
+    off a shared queue — FlacIt's `ultra_parallel_download`, with one change:
+    parts are written to disk at their offset as they arrive instead of held in
+    an in-memory buffer, since a job here is served straight off disk."""
+    dc_id = document.dc_id
+    senders = [await client._borrow_exported_sender(dc_id) for _ in range(connection_count)]
+    try:
+        location = types.InputDocumentFileLocation(
+            id=document.id,
+            access_hash=document.access_hash,
+            file_reference=document.file_reference,
+            thumb_size="",
+        )
+        total_size = document.size
+        part_count = math.ceil(total_size / PART_SIZE)
+
+        work_queue = asyncio.Queue()
+        for i in range(part_count):
+            await work_queue.put((i * PART_SIZE, PART_SIZE))
+
+        downloaded = 0
+        t0 = time.time()
+        last_update = 0.0
+
+        with open(save_path, "wb") as f:
+            f.truncate(total_size)
+
+        # A single file handle, seeked per part: safe without a lock because
+        # this all runs on one asyncio event loop — no two tasks execute Python
+        # bytecode concurrently, only interleaved at `await` points.
+        f = open(save_path, "r+b")
+        try:
+            async def worker(sender):
+                nonlocal downloaded, last_update
+                while True:
+                    _check_not_cancelled(job_id)
+                    try:
+                        offset, limit = work_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        return
+                    req = functions.upload.GetFileRequest(
+                        location=location, offset=offset, limit=limit,
+                        precise=True, cdn_supported=False,
+                    )
+                    res = await sender.send(req)
+                    data = res.bytes
+                    f.seek(offset)
+                    f.write(data)
+                    downloaded += len(data)
+                    work_queue.task_done()
+
+                    now = time.time()
+                    if now - last_update >= 0.5 or downloaded >= total_size:
+                        elapsed = now - t0
+                        speed = (downloaded / 1024 / 1024) / elapsed if elapsed > 0 else 0
+                        with jobs_lock:
+                            if job_id in jobs:
+                                jobs[job_id]["downloaded"] = round(downloaded / 1024 / 1024, 3)
+                                jobs[job_id]["speed_mbps"] = round(speed, 3)
+                        last_update = now
+
+            await asyncio.gather(*(worker(s) for s in senders))
+        finally:
+            f.close()
+    finally:
+        for s in senders:
+            await client._return_exported_sender(s)
+
+
+async def _process_fetch(job_id):
+    with jobs_lock:
+        job = jobs[job_id]
+        url = job["url"]
+        job["state"] = "resolving"
+
+    sent_at = datetime.now(timezone.utc)
+    try:
+        await client.send_message(BOT, url)
+    except errors.FloodWaitError as fw:
+        await asyncio.sleep(fw.seconds)
+        await client.send_message(BOT, url)
+
+    flac_msg = None
+    retried = False
+    start = time.time()
+    check_after = sent_at - timedelta(seconds=5)
+
+    while time.time() - start < FLAC_TIMEOUT:
+        _check_not_cancelled(job_id)
+        async for msg in client.iter_messages(BOT, limit=10):
+            if msg.date < check_after:
+                break
+            if _is_flac(msg):
+                flac_msg = msg
+                break
+        if flac_msg:
+            break
+
+        if time.time() - start > FLAC_RETRY_AFTER and not retried:
+            try:
+                await client.send_message(BOT, url)
+            except Exception:  # noqa
+                pass
+            retried = True
+        await asyncio.sleep(2)
+
+    if flac_msg is None or flac_msg.document is None:
+        with jobs_lock:
+            job["state"] = "failed"
+            job["error"] = "timed out waiting for @deezload2bot to deliver a FLAC"
+        return
+
+    filename = "track.flac"
+    for attr in flac_msg.document.attributes:
+        if isinstance(attr, DocumentAttributeFilename) and attr.file_name:
+            filename = attr.file_name
+            break
+
+    document = flac_msg.document
+    with jobs_lock:
+        job["filename"] = filename
+        job["size"] = document.size
+        job["state"] = "downloading"
+
+    temp_path = os.path.join(JOBS_DIR, f"{job_id}.part")
+    try:
+        await _parallel_download(document, temp_path, job_id)
+    except Exception as e:  # noqa
+        with jobs_lock:
+            job["state"] = "failed"
+            job["error"] = f"download failed: {e}"
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return
+
+    final_path = os.path.join(JOBS_DIR, f"{job_id}-{_safe_filename(filename)}")
+    os.replace(temp_path, final_path)
+    with jobs_lock:
+        job["path"] = final_path
+        job["state"] = "ready"
+
+
+async def _fetch_worker():
+    global _active_job_id
+    while True:
+        job_id = await _fetch_queue.get()
+        _active_job_id = job_id
+        try:
+            await _process_fetch(job_id)
+        except _JobCancelled:
+            pass  # caller already deleted the job; nothing left to report
+        except Exception as e:  # noqa
+            with jobs_lock:
+                if job_id in jobs:
+                    jobs[job_id]["state"] = "failed"
+                    jobs[job_id]["error"] = str(e)
+        finally:
+            _active_job_id = None
+            _cancelled_jobs.discard(job_id)
+            _fetch_queue.task_done()
+
+
+def _reap_loop():
+    while True:
+        time.sleep(60)
+        cutoff = time.time() - JOB_REAP_AFTER
+        with jobs_lock:
+            stale = [jid for jid, j in jobs.items()
+                     if j["created"] < cutoff and j["state"] in ("ready", "failed")]
+            removed = [jobs.pop(jid) for jid in stale]
+        for job in removed:
+            path = job.get("path")
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+# ---------------------------------------------------------------- login
+
+_login_state = {}
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        if _await(client.is_user_authorized(), timeout=15):
+            return _login_page(None, already=True)
+        return _login_page(None, step="phone")
+
+    data = request.get_json(silent=True) or request.form
+    step = (data.get("step") or "phone").strip()
+    try:
+        if step == "phone":
+            phone = (data.get("phone") or "").strip()
+            if not phone:
+                return _login_page("Phone number required.", step="phone"), 400
+            sent = _await(client.send_code_request(phone))
+            _login_state["phone"] = phone
+            _login_state["phone_code_hash"] = sent.phone_code_hash
+            return _login_page(None, step="code")
+
+        if step == "code":
+            phone = _login_state.get("phone")
+            if not phone:
+                return _login_page("Session expired — start over.", step="phone"), 400
+            code = (data.get("code") or "").strip()
+            try:
+                _await(client.sign_in(phone=phone, code=code,
+                                       phone_code_hash=_login_state["phone_code_hash"]))
+            except errors.SessionPasswordNeededError:
+                return _login_page(None, step="password")
+            _login_state.clear()
+            _await(_ensure_flac_quality())
+            return _login_page(None, done=True)
+
+        if step == "password":
+            password = data.get("password") or ""
+            _await(client.sign_in(password=password))
+            _login_state.clear()
+            _await(_ensure_flac_quality())
+            return _login_page(None, done=True)
+
+        return _login_page("Unknown step.", step="phone"), 400
+    except Exception as e:  # noqa
+        return _login_page(f"Login failed: {e}", step=step), 400
+
+
+def _login_page(err, step="phone", done=False, already=False):
+    if done:
+        body = (
+            "<h2>✅ Logged in to Telegram.</h2>"
+            "<p>One more one-time step if this is a fresh account: open Telegram, "
+            "start a chat with <b>@deezload2bot</b>, press Start, and join its "
+            "channel when it asks. Without that every download times out. "
+            "Then you can close this tab.</p>"
+        )
+    elif already:
+        body = "<h2>Already logged in.</h2>"
+    else:
+        e = f"<p style='color:#e5484d'>{err}</p>" if err else ""
+        if step == "code":
+            body = (
+                "<h2>Telegram login — enter the code</h2>" + e +
+                "<form method='post'><input type='hidden' name='step' value='code'>"
+                "<input name='code' style='width:100%;padding:8px' placeholder='12345' autofocus>"
+                "<br><br><button type='submit' style='padding:8px 16px'>Continue</button></form>"
+            )
+        elif step == "password":
+            body = (
+                "<h2>Telegram login — two-factor password</h2>" + e +
+                "<form method='post'><input type='hidden' name='step' value='password'>"
+                "<input type='password' name='password' style='width:100%;padding:8px' "
+                "placeholder='password' autofocus>"
+                "<br><br><button type='submit' style='padding:8px 16px'>Continue</button></form>"
+            )
+        else:
+            body = (
+                "<h2>Telegram login</h2>"
+                "<p>Enter the phone number for the account that has already started "
+                "@deezload2bot.</p>" + e +
+                "<form method='post'><input type='hidden' name='step' value='phone'>"
+                "<input name='phone' style='width:100%;padding:8px' placeholder='+15551234567' autofocus>"
+                "<br><br><button type='submit' style='padding:8px 16px'>Send code</button></form>"
+            )
+    return (
+        "<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>FlacIt gateway login</title>"
+        "<body style='font:15px/1.6 system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#111'>"
+        + body + "</body>"
+    )
+
+
+# ---------------------------------------------------------------- fetch API
+
+@app.route("/fetch", methods=["POST"])
+def fetch():
+    body = request.get_json(silent=True) or {}
+    url = (body.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "missing url"}), 400
+    if not _await(client.is_user_authorized(), timeout=15):
+        return jsonify({"error": "not logged in — open /login"}), 401
+
+    job_id = _new_job(url)
+    _await(_fetch_queue.put(job_id))
+    return jsonify({"job_id": job_id, "state": "queued"})
+
+
+@app.route("/fetch/<job_id>")
+def fetch_status(job_id):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "no such job"}), 404
+    return jsonify(_job_view(job))
+
+
+@app.route("/fetch/<job_id>/file")
+def fetch_file(job_id):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "no such job"}), 404
+    if job["state"] != "ready" or not job["path"]:
+        return jsonify({"error": f"job not ready (state={job['state']})"}), 409
+    return send_file(job["path"], as_attachment=True, download_name=job["filename"] or "track.flac")
+
+
+@app.route("/fetch/<job_id>", methods=["DELETE"])
+def fetch_delete(job_id):
+    _cancelled_jobs.add(job_id)
+    with jobs_lock:
+        job = jobs.pop(job_id, None)
+    if job and job.get("path") and os.path.exists(job["path"]):
+        try:
+            os.remove(job["path"])
+        except OSError:
+            pass
+    return jsonify({"ok": True})
+
+
+@app.route("/")
+def health():
+    try:
+        authorized = _await(client.is_user_authorized(), timeout=15)
+    except Exception:  # noqa
+        authorized = False
+    me = None
+    if authorized:
+        try:
+            u = _await(client.get_me(), timeout=15)
+            me = getattr(u, "username", None) or getattr(u, "phone", None)
+        except Exception:  # noqa
+            pass
+    return jsonify({
+        "ok": True,
+        "logged_in": authorized,
+        "me": me,
+        "flac_quality_set": os.path.exists(FLAC_QUALITY_FLAG),
+        "active_job": _active_job_id,
+    })
+
+
+# ---------------------------------------------------------------- startup
+
+def _startup():
+    asyncio.run_coroutine_threadsafe(_fetch_worker(), _loop)
+
+    _await(client.connect())
+    if _await(client.is_user_authorized(), timeout=15):
+        print("flacit-gateway: Telegram session loaded.", flush=True)
+        _await(_ensure_flac_quality())
+    else:
+        print("\n===============  TELEGRAM LOGIN REQUIRED  ===============", flush=True)
+        print("  Open in a browser:  http://<your-server-ip>:8082/login", flush=True)
+        print("  (one-time; also requires starting @deezload2bot manually)", flush=True)
+        print("============================================================\n", flush=True)
+
+    threading.Thread(target=_reap_loop, daemon=True).start()
+
+
+if __name__ == "__main__":
+    _startup()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8082")), threaded=True)

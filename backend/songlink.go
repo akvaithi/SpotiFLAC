@@ -30,18 +30,6 @@ type SongLinkURLs struct {
 	ISRC      string `json:"isrc"`
 }
 
-type TrackAvailability struct {
-	SpotifyID string `json:"spotify_id"`
-	Tidal     bool   `json:"tidal"`
-	Amazon    bool   `json:"amazon"`
-	Qobuz     bool   `json:"qobuz"`
-	Deezer    bool   `json:"deezer"`
-	TidalURL  string `json:"tidal_url,omitempty"`
-	AmazonURL string `json:"amazon_url,omitempty"`
-	QobuzURL  string `json:"qobuz_url,omitempty"`
-	DeezerURL string `json:"deezer_url,omitempty"`
-}
-
 type songLinkScrapeResult struct {
 	ISRC      string
 	TidalURL  string
@@ -65,16 +53,6 @@ type songLinkNextData struct {
 			} `json:"pageData"`
 		} `json:"pageProps"`
 	} `json:"props"`
-}
-
-type qobuzAvailabilityTrack struct {
-	ID    int64 `json:"id"`
-	Album struct {
-		ID          string `json:"id"`
-		Title       string `json:"title"`
-		URL         string `json:"url"`
-		RelativeURL string `json:"relative_url"`
-	} `json:"album"`
 }
 
 func NewSongLinkClient() *SongLinkClient {
@@ -106,142 +84,6 @@ func (s *SongLinkClient) GetAllURLsFromSpotify(spotifyTrackID string, region str
 	}
 
 	return urls, nil
-}
-
-func (s *SongLinkClient) CheckTrackAvailability(spotifyTrackID string) (*TrackAvailability, error) {
-	links, err := s.resolveSpotifyTrackLinks(spotifyTrackID, "")
-
-	availability := &TrackAvailability{
-		SpotifyID: spotifyTrackID,
-	}
-
-	if links != nil {
-		availability.TidalURL = links.TidalURL
-		availability.AmazonURL = normalizeAmazonMusicURL(links.AmazonURL)
-		availability.DeezerURL = normalizeDeezerTrackURL(links.DeezerURL)
-		availability.Tidal = availability.TidalURL != ""
-		availability.Amazon = availability.AmazonURL != ""
-		availability.Deezer = availability.DeezerURL != ""
-	}
-
-	isrc := ""
-	if links != nil {
-		isrc = strings.TrimSpace(links.ISRC)
-	}
-
-	if isrc == "" && availability.DeezerURL != "" {
-		if resolvedISRC, deezerErr := getDeezerISRC(availability.DeezerURL); deezerErr == nil {
-			isrc = resolvedISRC
-		}
-	}
-
-	if isrc == "" {
-		if fallbackISRC, fallbackErr := s.lookupSpotifyISRC(spotifyTrackID); fallbackErr == nil {
-			isrc = fallbackISRC
-		} else if err == nil {
-			err = fallbackErr
-		}
-	}
-
-	if isrc != "" {
-		availability.Qobuz, availability.QobuzURL = checkQobuzAvailability(isrc)
-	}
-
-	if availability.Tidal || availability.Amazon || availability.Deezer || availability.Qobuz {
-		return availability, nil
-	}
-
-	if err != nil {
-		return availability, err
-	}
-
-	return availability, fmt.Errorf("no platforms found")
-}
-
-func qobuzNormalizeRelativeURL(rawURL string) string {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return ""
-	}
-	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
-		return rawURL
-	}
-	if strings.HasPrefix(rawURL, "/") {
-		return "https://www.qobuz.com" + rawURL
-	}
-	return "https://www.qobuz.com/" + rawURL
-}
-
-func qobuzSlugifySegment(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if value == "" {
-		return ""
-	}
-
-	var builder strings.Builder
-	lastDash := false
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			builder.WriteRune(r)
-			lastDash = false
-		default:
-			if !lastDash {
-				builder.WriteByte('-')
-				lastDash = true
-			}
-		}
-	}
-
-	return strings.Trim(builder.String(), "-")
-}
-
-func qobuzAlbumSlugURL(albumTitle string, albumID string) string {
-	albumID = strings.TrimSpace(albumID)
-	if albumID == "" {
-		return ""
-	}
-
-	slug := qobuzSlugifySegment(albumTitle)
-	if slug == "" {
-		return fmt.Sprintf("https://www.qobuz.com/album/%s", albumID)
-	}
-
-	return fmt.Sprintf("https://www.qobuz.com/album/%s/%s", slug, albumID)
-}
-
-func checkQobuzAvailability(isrc string) (bool, string) {
-	var searchResp struct {
-		Tracks struct {
-			Total int                      `json:"total"`
-			Items []qobuzAvailabilityTrack `json:"items"`
-		} `json:"tracks"`
-	}
-
-	if err := doQobuzSignedJSONRequest("track/search", url.Values{
-		"query": {strings.TrimSpace(isrc)},
-		"limit": {"1"},
-	}, &searchResp); err != nil {
-		return false, ""
-	}
-
-	if searchResp.Tracks.Total == 0 || len(searchResp.Tracks.Items) == 0 {
-		return false, ""
-	}
-
-	item := searchResp.Tracks.Items[0]
-	qobuzURL := strings.TrimSpace(item.Album.URL)
-	if qobuzURL == "" {
-		qobuzURL = qobuzNormalizeRelativeURL(item.Album.RelativeURL)
-	}
-	if qobuzURL == "" {
-		qobuzURL = qobuzAlbumSlugURL(item.Album.Title, item.Album.ID)
-	}
-	if qobuzURL == "" && item.ID > 0 {
-		qobuzURL = fmt.Sprintf("https://www.qobuz.com/us-en/track/%d", item.ID)
-	}
-
-	return true, qobuzURL
 }
 
 func (s *SongLinkClient) GetDeezerURLFromSpotify(spotifyTrackID string) (string, error) {

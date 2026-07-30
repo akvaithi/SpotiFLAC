@@ -2,6 +2,32 @@
 
 Snapshot of where things stand. Read `CLAUDE.md` for architecture/build details.
 
+## 2026-07-30 — Download engine replaced: Telegram/Deezer via flacit-gateway
+
+Ripped out the Tidal/Qobuz/Amazon downloaders, the community Cloudflare
+verification bridge, and the Tidal PKCE gateway entirely — replaced with a
+single new source ported from [FlacIt](https://github.com/BunnY-exe/FlacIt):
+a Telethon session drives `@deezload2bot` over Telegram MTProto, and the
+resulting Deezer-sourced FLAC is pulled down with 16 parallel connections
+(~3.5-4.6 MB/s vs. the ~0.3 MB/s a single MTProto stream is throttled to).
+New sidecar `flacit-gateway/` (own image, own `/config`, same shape as the old
+`tidal-gateway/`) exposes a small job API (`POST /fetch`, poll `GET
+/fetch/<id>`, `GET /fetch/<id>/file`) that `backend/flacit.go` drives.
+
+Kept: the whole Spotify catalog / queue / tagging / library index / dedup /
+enrichment / Navidrome-rescan layer — none of it was provider-specific.
+`SongLinkClient.GetDeezerURLFromSpotify` (already existed, used for ISRC) now
+also supplies the Deezer link the bot needs, so no new resolution code was
+required there.
+
+Two consequences accepted going in, not bugs: **16-bit/44.1kHz only** (no
+hi-res tier — Deezer doesn't offer one), and **no fallback source** — a track
+Deezer doesn't carry now fails into the queue's failed list instead of being
+retried against another provider.
+
+**Not yet deployed to the ZimaOS box as of this entry** — see "Pending" below
+for what's left before the live server is running this.
+
 ## 2026-07-29 — Harmony backfill, and library enrichment
 
 - **662-track backfill** queued from Harmony out of six years of Spotify listening
@@ -54,26 +80,35 @@ Result: **621 covers added, 717 already had one, 0 failures**; 150/150 sampled f
 now carry a picture block and **90/90 albums show real art**. Post-deploy checks
 done — gateway URL still `http://172.17.0.1:8081`, token auth still returning 401.
 
-## Status: working in production
-The user self-hosts this on a **ZimaOS** box (CasaOS-managed Docker). Full flow
-works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
-**hi-res/lossless FLAC** into their Navidrome music folder.
+## Status: download engine swapped locally, redeploy pending
+The user self-hosts this on a **ZimaOS** box (CasaOS-managed Docker). The
+previously-working flow was Spotify URL → Tidal (via the user's own PKCE
+gateway) → hi-res/lossless FLAC into their Navidrome music folder. As of
+2026-07-30 that engine has been replaced locally (code complete, builds clean)
+with Spotify URL → Deezer via `@deezload2bot`/Telegram → 16-bit/44.1kHz FLAC.
+**The live server is still running the old Tidal-gateway image** until the
+deploy steps below are completed.
 
 ## Where things live
 - **Repo**: https://github.com/akvaithi/SpotiFLAC (public, `main`)
 - **Images** (public, ghcr, amd64, built by GitHub Actions on push):
   - `ghcr.io/akvaithi/spotiflac:latest`
-  - `ghcr.io/akvaithi/tidal-gateway:latest`
+  - `ghcr.io/akvaithi/flacit-gateway:latest` (replaces `tidal-gateway`, which is
+    removed from `main` as of 2026-07-30 — the ghcr package can stay published,
+    just unused, or be deleted once the new one is confirmed working)
 - **Server**: ZimaOS, compose at `/DATA/.casaos/apps/spotiflac/docker-compose.yml`
-  - App: `http://<zimaos-ip>:8080`  ·  Gateway: `http://<zimaos-ip>:8081`
-  - Shared config volume: `/DATA/AppData/spotiflac/config` (both containers)
+  - App: `http://<zimaos-ip>:8080`  ·  Gateway: `http://<zimaos-ip>:8082`
+    (was `8081` for `tidal-gateway`)
+  - `spotiflac`'s config volume: `/DATA/AppData/spotiflac/config`. The gateway
+    now has its **own** volume, `/DATA/AppData/flacit-gateway`, holding
+    `telegram-session.session` — not shared with `spotiflac`'s config.
   - Music/library + downloads: `/DATA/Media/Music` → `/downloads`
   - Both containers use `network_mode: bridge` (the default docker0 bridge), so
     **container IPs shift on every recreate** and container-name DNS does not
-    work. The gateway moved `172.17.0.12` → `172.17.0.11` on the 2026-07-28
-    deploy and silently broke the saved "Custom Tidal API URL". The saved URL is
-    now `http://172.17.0.1:8081` — docker0's host gateway plus the gateway's
-    published port — which survives recreates. Don't put a container IP back.
+    work. This bit the old Tidal gateway URL more than once; the fix carries
+    over unchanged — the saved `flacitApiUrl` must be `http://172.17.0.1:8082`,
+    docker0's host gateway plus the new gateway's published port, never a
+    `172.17.0.x` container IP.
 
 ## Access / deploy
 - A deploy is CI building the images, then pulling them on the server:
@@ -90,9 +125,9 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
   read from the macOS Keychain at the moment of use
   (`security find-generic-password -s spotiflac-deploy -w`). If that lookup fails,
   ask the user — don't put the value in a file or a commit.
-- **Always re-check the saved Tidal gateway URL after a deploy.** Recreating
+- **Always re-check the saved flacit-gateway URL after a deploy.** Recreating
   containers changes their bridge IPs; the saved URL must stay
-  `http://172.17.0.1:8081`, never a `172.17.0.x` container IP.
+  `http://172.17.0.1:8082`, never a `172.17.0.x` container IP.
 
 ## Done so far (chronological highlights)
 1. Ported Wails desktop app → HTTP server + web UI + reflection RPC + SSE.
@@ -122,15 +157,20 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
     replace polling; the worker triggers a Navidrome `/rest/startScan` when the
     queue drains; `GetRelatedArtists` / `GetArtistMembers` for browsing;
     and an optional `API_TOKEN` (off by default) for the previously wide-open API.
+11. **Download engine swap to Telegram/Deezer** (2026-07-30, code-complete —
+    see top of file): removed Tidal/Qobuz/Amazon + the Cloudflare verification
+    bridge + the Tidal PKCE gateway; added `flacit-gateway/` and
+    `backend/flacit.go`, ported from FlacIt's `@deezload2bot` MTProto pipeline.
 
 ## Pending / not yet deployed
-- Nothing. Deployed and fully verified on 2026-07-28 (second deploy): durable queue
-  answering, `GetRelatedArtists` returning live Spotify data, and the **whole
-  acquisition loop proven end to end** — Navidrome searched for a track it didn't
-  have (0 hits) → `EnqueueDownloads` → 29.7 MB FLAC → worker auto-triggered
-  `/rest/startScan` → same search returned it as FLAC 1111 kbps with a real
-  Navidrome id, library count 740 → 741. Saved gateway URL re-checked and still
-  `http://172.17.0.1:8081`.
+- **The 2026-07-30 Telegram/flacit-gateway swap (see top of file) — not yet on
+  the live server.** Still needed: copy a working Telethon session onto the box
+  at `/DATA/AppData/flacit-gateway/telegram-session.session`, update the
+  server's compose file (drop `tidal-gateway`, add `flacit-gateway`, set
+  `FLACIT_GATEWAY_URL`), push to `main` so CI builds `flacit-gateway:latest`,
+  flip that ghcr package public, then `docker compose pull && up -d` and verify
+  `GetFlacItStatus` reports `logged_in: true` before trusting it with a real
+  download.
 - **Navidrome credentials are configured** in
   `/DATA/AppData/spotiflac/config/.spotiflac/config.json` (`navidromeUrl` =
   `http://172.17.0.1:4533` — docker0 host gateway, *not* a container IP —
@@ -141,25 +181,23 @@ works end-to-end: Spotify URL → Tidal (via the user's own PKCE gateway) →
   to hit "Scan library" once** to rebuild it.
 
 ## Possible next steps (user may ask)
-- **Honest `.m4a` for no-FLAC tracks**: currently the no-FLAC path transcodes the
-  lossy stream into a `.flac` container (playable, but not true lossless). Saving
-  as real `.m4a` needs the extension to propagate through `buildTidalOutputPath`
-  and the Tidal downloader's return path. User was offered this; not built yet.
-- **Qobuz gateway**: same pattern as the Tidal one (contract:
-  `GET /api/download-music?track_id=&quality=27` → `{success, data:{url}}`) so
-  downloads can fall back Tidal → Qobuz for coverage. Stubbed in docs only.
 - Dedup matching tuning if false matches/misses show up (normalization lives in
   `library.go`: `normStr` / `firstArtist` / `nameKey`).
+- A second download source for tracks Deezer doesn't have — deliberately not
+  built with the 2026-07-30 swap (see Boundaries in `CLAUDE.md`); would need a
+  new decision, not a resurrection of the removed Tidal/Qobuz/Amazon engines.
 
 ## Known caveats
-- Community servers run rate limits + scheduled "breaks"; the gateway path avoids
-  them. We deliberately do NOT bypass those limits.
-- No-FLAC fallback files are `.flac` but sourced from AAC (Tidal has no lossless
-  for that track) — playable, not audiophile-lossless.
-- Single active download queue (matches upstream); fine for one user. The durable
-  queue worker is deliberately serial for the same reason — `DownloadTrack` shares
-  package-level progress state, so parallel downloads would corrupt it.
-- Local smoke tests can't finish a download on macOS: `ffmpeg` isn't installed, so
-  the FLAC conversion step fails after the bytes arrive. That's environmental (the
-  image ships ffmpeg), but it means "download failed" locally is not a real signal.
-- Everything is ToS-gray personal-use tooling; the user has paid Tidal + Spotify.
+- **16-bit/44.1kHz only, no fallback source.** Accepted trade-off of the
+  2026-07-30 swap, not a bug — see `CLAUDE.md` and this file's 2026-07-30 entry.
+- The gateway processes one fetch at a time (bot chat is a single stateful
+  conversation), same as SpotiFLAC's own download worker being serial —
+  matches, doesn't add a new bottleneck.
+- flacit-gateway's Telegram session can be revoked/expire independent of
+  anything in this repo; `GetFlacItStatus` / the gateway's `GET /` is the way
+  to check before assuming a stuck queue is this repo's fault.
+- Local smoke tests on macOS still can't finish a *full* download end-to-end if
+  `ffmpeg` isn't installed for any conversion step the request asks for — that's
+  environmental (the image ships ffmpeg); the flacit-gateway ↔ backend/flacit.go
+  path itself has no ffmpeg dependency.
+- Everything is ToS-gray personal-use tooling; the user has paid Spotify.

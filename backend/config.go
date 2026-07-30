@@ -2,69 +2,10 @@ package backend
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 )
-
-const legacyTidalAPICacheFile = "tidal-api-urls.json"
-
-func normalizeCustomTidalAPIValue(value interface{}) string {
-	customAPI, _ := value.(string)
-	customAPI = strings.TrimRight(strings.TrimSpace(customAPI), "/")
-	if strings.HasPrefix(customAPI, "https://") {
-		return customAPI
-	}
-	return ""
-}
-
-func sanitizeDownloaderValue(value interface{}) string {
-	downloader, _ := value.(string)
-	switch strings.TrimSpace(strings.ToLower(downloader)) {
-	case "tidal":
-		return "tidal"
-	case "qobuz":
-		return "qobuz"
-	case "amazon":
-		return "amazon"
-	default:
-		return "auto"
-	}
-}
-
-func sanitizeAutoOrderValue(value interface{}) string {
-	autoOrder, _ := value.(string)
-	allowed := map[string]struct{}{
-		"tidal":  {},
-		"qobuz":  {},
-		"amazon": {},
-	}
-	fallback := "tidal-qobuz-amazon"
-
-	seen := make(map[string]struct{})
-	parts := make([]string, 0, 3)
-	for _, rawPart := range strings.Split(strings.TrimSpace(strings.ToLower(autoOrder)), "-") {
-		part := strings.TrimSpace(rawPart)
-		if part == "" {
-			continue
-		}
-		if _, ok := allowed[part]; !ok {
-			continue
-		}
-		if _, ok := seen[part]; ok {
-			continue
-		}
-		seen[part] = struct{}{}
-		parts = append(parts, part)
-	}
-
-	if len(parts) < 2 {
-		return fallback
-	}
-
-	return strings.Join(parts, "-")
-}
 
 func SanitizeSettingsMap(settings map[string]interface{}) map[string]interface{} {
 	if settings == nil {
@@ -76,26 +17,7 @@ func SanitizeSettingsMap(settings map[string]interface{}) map[string]interface{}
 		sanitized[key] = value
 	}
 
-	customAPI := normalizeCustomTidalAPIValue(sanitized["customTidalApi"])
-	sanitized["customTidalApi"] = customAPI
-	sanitized["downloader"] = sanitizeDownloaderValue(sanitized["downloader"])
-	sanitized["autoOrder"] = sanitizeAutoOrderValue(sanitized["autoOrder"])
-
 	return sanitized
-}
-
-func CleanupLegacyTidalPublicAPIState() error {
-	appDir, err := EnsureAppDir()
-	if err != nil {
-		return err
-	}
-
-	cachePath := filepath.Join(appDir, legacyTidalAPICacheFile)
-	if err := os.Remove(cachePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-
-	return nil
 }
 
 func SanitizePersistedConfigSettings() error {
@@ -170,6 +92,33 @@ func LoadConfigSettings() (map[string]interface{}, error) {
 	return SanitizeSettingsMap(settings), nil
 }
 
+// defaultFlacItGatewayURL is docker0's host gateway plus flacit-gateway's
+// published port. It must never be a container IP or container name: both
+// containers run network_mode: bridge, so container IPs shift on every
+// recreate and container-name DNS doesn't resolve — this is the same trap
+// that used to silently break the Tidal gateway URL after a deploy.
+const defaultFlacItGatewayURL = "http://172.17.0.1:8082"
+
+// GetFlacItGatewayURL resolves the Telegram gateway address: FLACIT_GATEWAY_URL
+// env var first (set on the container), then the persisted "flacitApiUrl"
+// setting, then the docker0 default.
+func GetFlacItGatewayURL() string {
+	if fromEnv := strings.TrimSpace(os.Getenv("FLACIT_GATEWAY_URL")); fromEnv != "" {
+		return strings.TrimRight(fromEnv, "/")
+	}
+
+	settings, err := LoadConfigSettings()
+	if err == nil && settings != nil {
+		if fromConfig, ok := settings["flacitApiUrl"].(string); ok {
+			if trimmed := strings.TrimRight(strings.TrimSpace(fromConfig), "/"); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+
+	return defaultFlacItGatewayURL
+}
+
 func GetRedownloadWithSuffixSetting() bool {
 	settings, err := LoadConfigSettings()
 	if err != nil || settings == nil {
@@ -181,15 +130,6 @@ func GetRedownloadWithSuffixSetting() bool {
 		return true
 	}
 	return enabled
-}
-
-func GetCustomTidalAPISetting() string {
-	settings, err := LoadConfigSettings()
-	if err != nil || settings == nil {
-		return ""
-	}
-
-	return normalizeCustomTidalAPIValue(settings["customTidalApi"])
 }
 
 func normalizeExistingFileCheckMode(value string) string {

@@ -33,19 +33,6 @@
         <button id="fetchBtn" class="primary">Fetch</button>
       </div>
       <div class="row opts">
-        <label>Service
-          <select id="service">
-            <option value="tidal">Tidal</option>
-            <option value="qobuz">Qobuz</option>
-            <option value="amazon">Amazon</option>
-          </select>
-        </label>
-        <label>Format
-          <select id="format">
-            <option value="LOSSLESS">FLAC (Lossless)</option>
-            <option value="HI_RES_LOSSLESS">Hi-Res (Tidal/Qobuz)</option>
-          </select>
-        </label>
         <label>Filename
           <select id="filenameFormat">
             <option value="title-artist">Title - Artist</option>
@@ -140,59 +127,24 @@
         <input id="setDownloadPath" type="text">
         <small class="muted">Inside the container this is the mounted volume (default <code>/downloads</code>).</small>
       </label>
-      <label class="field">Default service
-        <select id="setService"><option value="tidal">Tidal</option><option value="qobuz">Qobuz</option><option value="amazon">Amazon</option></select>
-      </label>
       <label class="field">Artist separator
         <select id="setSeparator"><option value="comma">Comma ( , )</option><option value="semicolon">Semicolon ( ; )</option></select>
       </label>
       <label class="checkbox"><input id="setEmbedLyrics" type="checkbox"> Embed lyrics</label>
       <label class="checkbox"><input id="setSaveCover" type="checkbox"> Save cover art file</label>
-      <label class="checkbox"><input id="setFallback" type="checkbox" checked> Allow fallback to other quality</label>
-      <label class="checkbox"><input id="setLossy" type="checkbox" checked> Download best available quality when no FLAC exists (instead of failing)</label>
       <div class="row"><button id="saveSettings" class="primary">Save settings</button><span id="settingsMsg" class="msg"></span></div>
     </div>
     <div class="card">
-      <h3>Your own gateway (bypass community servers)</h3>
-      <p class="muted small">Point the app at your own Tidal/Qobuz API gateway to skip the shared community servers, their Cloudflare check, and their rate limits entirely. Leave blank to use the community servers.</p>
-      <label class="field">Custom Tidal API URL
-        <div class="row"><input id="setTidalApi" type="text" placeholder="https://tidal.mygateway.lan" style="flex:1"><button id="testTidal" class="small">Test</button></div>
-        <small class="muted" id="tidalApiMsg"></small>
+      <h3>Telegram gateway</h3>
+      <p class="muted small">SpotiFLAC's only download source: a Telethon session drives @deezload2bot and pulls the FLAC it posts. Leave blank to use the default (<code>http://172.17.0.1:8082</code>, the flacit-gateway container's docker0 address).</p>
+      <label class="field">Gateway URL
+        <div class="row"><input id="setFlacitApi" type="text" placeholder="http://172.17.0.1:8082" style="flex:1"><button id="testFlacit" class="small">Check</button></div>
+        <small class="muted" id="flacitApiMsg"></small>
       </label>
-      <label class="field">Custom Qobuz API URL
-        <div class="row"><input id="setQobuzApi" type="text" placeholder="https://qobuz.mygateway.lan" style="flex:1"><button id="testQobuz" class="small">Test</button></div>
-        <small class="muted" id="qobuzApiMsg"></small>
-      </label>
-      <div class="row"><button id="saveApis" class="primary">Save gateway URLs</button><span id="apisMsg" class="msg"></span></div>
-    </div>
-    <div class="card">
-      <h3>Community API status</h3>
-      <div id="apiStatus" class="muted">checking…</div>
-      <button id="checkStatus" class="small">Re-check</button>
+      <div class="row"><button id="saveFlacitApi" class="primary">Save gateway URL</button><span id="flacitApisMsg" class="msg"></span></div>
     </div>
   </section>
 </main>
-
-<!-- VERIFICATION MODAL -->
-<div id="verifyModal" class="modal-backdrop">
-  <div class="modal">
-    <h2>Verification required</h2>
-    <ol class="verify-steps">
-      <li><b>Open</b> the verification page and complete the Cloudflare check.</li>
-      <li>Your browser will then land on a page that <b>won't load</b> (address starts with <code>http://127.0.0.1…</code>). That's expected.</li>
-      <li><b>Copy that page's full web address</b> and paste it below, then Submit.</li>
-    </ol>
-    <div class="row center">
-      <button id="verifyOpen" class="primary">1 · Open verification page</button>
-    </div>
-    <textarea id="verifyPaste" rows="2" placeholder="Paste the http://127.0.0.1:…/session-grant?…&grant=… address here"></textarea>
-    <div class="row center">
-      <button id="verifySubmit" class="primary">2 · Submit</button>
-      <button id="verifyCancel" class="small">Cancel</button>
-    </div>
-    <p class="muted small" id="verifyStatus"></p>
-  </div>
-</div>
 
 <script src="app.js"></script>
 </body>

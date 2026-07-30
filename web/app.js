@@ -50,7 +50,7 @@ function firstImage(s) { if (!s) return ''; const p = String(s).split(/\s+/).fil
   } catch {}
   applySettingsToUI();
   connectEvents();
-  checkApiStatus();
+  checkFlacitStatus();
   refreshLibStatus();
   $('filesPath').textContent = state.server.download_dir;
 })();
@@ -68,47 +68,11 @@ function connectEvents() {
 
 function handleEvent(name, data) {
   switch (name) {
-    case 'verification-required':
-      showVerify(data && data.challenge_url);
-      break;
-    case 'verification-complete':
-      $('verifyStatus').textContent = (data && data.ok) ? 'Verified! Continuing…' : 'Verification failed — try again.';
-      if (data && data.ok) setTimeout(hideVerify, 1200);
-      break;
     case 'metadata-stream':
       // incremental playlist metadata; ignored for simplicity (full result returned on fetch)
       break;
   }
 }
-
-// ---------- verification modal ----------
-let pendingChallenge = null;
-function showVerify(url) {
-  pendingChallenge = url;
-  $('verifyStatus').textContent = '';
-  $('verifyPaste').value = '';
-  $('verifyModal').classList.add('show');
-}
-function hideVerify() { $('verifyModal').classList.remove('show'); pendingChallenge = null; }
-$('verifyOpen').onclick = () => { if (pendingChallenge) window.open(pendingChallenge, '_blank'); };
-$('verifyCancel').onclick = hideVerify;
-$('verifySubmit').onclick = async () => {
-  const value = $('verifyPaste').value.trim();
-  if (!value) { $('verifyStatus').textContent = 'Paste the address first.'; return; }
-  $('verifyStatus').textContent = 'Submitting…';
-  try {
-    const res = await fetch('/api/verify/complete', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-    $('verifyStatus').textContent = 'Verified! Your download will continue.';
-    setTimeout(hideVerify, 1200);
-  } catch (e) {
-    $('verifyStatus').textContent = 'Failed: ' + e.message;
-  }
-};
 
 // ---------- fetch metadata ----------
 $('mode').onchange = () => {
@@ -218,33 +182,20 @@ function trackRowHTML(t, withCheckbox) {
 }
 
 // ---------- download ----------
-function gatewayURL(id, key) {
-  // Prefer the live Settings field (works even if "Save" wasn't clicked),
-  // fall back to the saved setting.
-  const el = $(id);
-  const fromField = el && el.value ? el.value.trim() : '';
-  return fromField || (state.settings && state.settings[key]) || '';
-}
-
 function buildRequest(t) {
   const s = state.settings || {};
   return {
-    service: $('service').value,
+    service: 'flacit',
     spotify_id: t.spotify_id || t.id || '',
     track_name: t.name || '',
     artist_name: t.artists || '',
     album_name: t.album_name || '',
     cover_url: firstImage(t.images),
     output_dir: (s.downloadPath || state.server.download_dir),
-    audio_format: $('format').value,
     filename_format: $('filenameFormat').value,
     playlist_name: (state.collection && state.collection.playlistName) || '',
     embed_lyrics: !!s.embedLyrics,
     save_cover: !!s.saveCover,
-    allow_fallback: s.allowFallback !== false,
-    allow_lossy_fallback: s.allowLossy !== false,
-    tidal_api_url: gatewayURL('setTidalApi', 'tidalApiUrl'),
-    qobuz_api_url: gatewayURL('setQobuzApi', 'qobuzApiUrl'),
   };
 }
 
@@ -529,93 +480,61 @@ async function markLibraryDuplicates() {
 function applySettingsToUI() {
   const s = state.settings || {};
   $('setDownloadPath').value = s.downloadPath || state.server.download_dir;
-  $('setService').value = s.service || 'tidal';
   $('setSeparator').value = s.separator || 'comma';
   $('setEmbedLyrics').checked = !!s.embedLyrics;
   $('setSaveCover').checked = !!s.saveCover;
-  $('setFallback').checked = s.allowFallback !== false;
-  $('setLossy').checked = s.allowLossy !== false;
-  $('setTidalApi').value = s.tidalApiUrl || '';
-  $('setQobuzApi').value = s.qobuzApiUrl || '';
-  if (s.service) $('service').value = s.service;
-  updateGatewayIndicator();
+  $('setFlacitApi').value = s.flacitApiUrl || '';
 }
 
-$('saveApis').onclick = async () => {
+async function persistFlacitApi() {
   const s = Object.assign({}, state.settings, {
-    tidalApiUrl: $('setTidalApi').value.trim(),
-    qobuzApiUrl: $('setQobuzApi').value.trim(),
-  });
-  const msg = $('apisMsg'); msg.className = 'msg';
-  try { await rpc('SaveSettings', s); state.settings = s; msg.className = 'msg ok'; msg.textContent = 'Saved.'; }
-  catch (e) { msg.className = 'msg err'; msg.textContent = e.message; }
-};
-async function persistGateway() {
-  const s = Object.assign({}, state.settings, {
-    tidalApiUrl: $('setTidalApi').value.trim(),
-    qobuzApiUrl: $('setQobuzApi').value.trim(),
+    flacitApiUrl: $('setFlacitApi').value.trim(),
   });
   try { await rpc('SaveSettings', s); state.settings = s; } catch {}
-  updateGatewayIndicator();
 }
-$('testTidal').onclick = async () => {
-  const url = $('setTidalApi').value.trim(); const m = $('tidalApiMsg');
-  if (!url) { m.textContent = 'Enter a URL first.'; return; }
-  m.textContent = 'Testing…';
-  try {
-    const ok = await rpc('CheckCustomTidalAPI', url);
-    m.textContent = ok ? '✅ online — saved and active for Tidal downloads' : '❌ not responding correctly';
-    if (ok) await persistGateway();
-  } catch (e) { m.textContent = '❌ ' + e.message; }
+$('saveFlacitApi').onclick = async () => {
+  const msg = $('flacitApisMsg'); msg.className = 'msg';
+  try { await persistFlacitApi(); msg.className = 'msg ok'; msg.textContent = 'Saved.'; checkFlacitStatus(); }
+  catch (e) { msg.className = 'msg err'; msg.textContent = e.message; }
 };
-$('testQobuz').onclick = async () => {
-  const url = $('setQobuzApi').value.trim(); const m = $('qobuzApiMsg');
-  if (!url) { m.textContent = 'Enter a URL first.'; return; }
-  m.textContent = 'Testing…';
+$('testFlacit').onclick = async () => {
+  const m = $('flacitApiMsg');
+  m.textContent = 'Checking…';
+  await persistFlacitApi();
   try {
-    const ok = await rpc('CheckCustomQobuzAPI', url);
-    m.textContent = ok ? '✅ online — saved and active for Qobuz downloads' : '❌ not responding correctly';
-    if (ok) await persistGateway();
+    const status = await rpc('GetFlacItStatus');
+    m.textContent = flacitStatusText(status);
   } catch (e) { m.textContent = '❌ ' + e.message; }
 };
 
-function updateGatewayIndicator() {
-  const svc = $('service').value;
-  const t = gatewayURL('setTidalApi', 'tidalApiUrl');
-  const q = gatewayURL('setQobuzApi', 'qobuzApiUrl');
-  const el = $('gatewayIndicator');
-  if (!el) return;
-  let active = '';
-  if (svc === 'tidal' && t) active = 'your Tidal gateway';
-  else if (svc === 'qobuz' && q) active = 'your Qobuz gateway';
-  if (active) { el.textContent = '● Using ' + active + ' (community servers bypassed)'; el.style.display = 'block'; }
-  else { el.style.display = 'none'; }
-}
-$('service').addEventListener('change', updateGatewayIndicator);
 $('saveSettings').onclick = async () => {
   const s = Object.assign({}, state.settings, {
     downloadPath: $('setDownloadPath').value.trim(),
-    service: $('setService').value,
     separator: $('setSeparator').value,
     embedLyrics: $('setEmbedLyrics').checked,
     saveCover: $('setSaveCover').checked,
-    allowFallback: $('setFallback').checked,
-    allowLossy: $('setLossy').checked,
   });
   const msg = $('settingsMsg'); msg.className = 'msg';
   try { await rpc('SaveSettings', s); state.settings = s; applySettingsToUI(); msg.className = 'msg ok'; msg.textContent = 'Saved.'; }
   catch (e) { msg.className = 'msg err'; msg.textContent = e.message; }
 };
 
-// ---------- api status ----------
-async function checkApiStatus() {
-  const el = $('apiStatus');
-  try {
-    const r = await rpc('GetCommunityBreakStatuses');
-    const parts = Object.entries(r || {}).map(([k, v]) =>
-      `${k}: ${v.available ? (v.is_break ? 'on break ' + v.remaining_minutes + 'm' : 'available') : 'unavailable'}`);
-    el.textContent = parts.join(' · ') || 'unknown';
-  } catch (e) { el.textContent = 'status check failed: ' + e.message; }
+// ---------- telegram gateway status ----------
+function flacitStatusText(status) {
+  if (!status || !status.ok) return '❌ unreachable' + (status && status.error ? ' — ' + status.error : '');
+  if (!status.logged_in) return '⚠️ not logged in — open ' + (status.gateway_url || '') + '/login';
+  return '✅ logged in as ' + (status.me || 'unknown') + (status.flac_quality_set ? '' : ' — FLAC quality not yet confirmed');
 }
-$('checkStatus').onclick = checkApiStatus;
+async function checkFlacitStatus() {
+  const el = $('gatewayIndicator');
+  if (!el) return;
+  try {
+    const status = await rpc('GetFlacItStatus');
+    el.textContent = 'Telegram gateway: ' + flacitStatusText(status);
+    el.style.display = 'block';
+  } catch (e) {
+    el.textContent = 'Telegram gateway: status check failed — ' + e.message;
+    el.style.display = 'block';
+  }
+}
 

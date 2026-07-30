@@ -78,12 +78,6 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 	ch := hub.subscribe()
 	defer hub.unsubscribe(ch)
 
-	// Tell the client the current verification state on connect so a page
-	// reload during a pending challenge still shows the modal.
-	if pending := getPendingVerification(); pending != "" {
-		writeSSE(w, flusher, sseEvent{Name: "verification-required", Data: map[string]string{"challenge_url": pending}})
-	}
-
 	keepalive := time.NewTicker(25 * time.Second)
 	defer keepalive.Stop()
 
