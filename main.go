@@ -70,6 +70,14 @@ func main() {
 	mux.HandleFunc("/api/events", requireAPIToken(handleEvents))
 	mux.HandleFunc("/api/server-info", handleServerInfo)
 	mux.HandleFunc("/api/file", requireAPIToken(handleFileDownload))
+
+	// The Subsonic facade is deliberately NOT behind requireAPIToken: a
+	// Subsonic client can't send a SpotiFLAC bearer token, and /rest/* carries
+	// Navidrome's own u/t/s auth, which Navidrome itself validates.
+	if facade = initSubsonicFacade(app); facade != nil {
+		mux.Handle("/rest/", facade)
+	}
+
 	mux.Handle("/", staticHandler())
 
 	srv := &http.Server{

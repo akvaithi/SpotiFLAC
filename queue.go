@@ -211,6 +211,15 @@ func (w *downloadWorker) flushScan() {
 		return
 	}
 	emitEvent("navidrome:scan", map[string]interface{}{"ok": true})
+
+	// A track acquired through the Subsonic facade was starred (or filed into
+	// a playlist) as a placeholder id that Navidrome never saw. Now that the
+	// real file is indexed, make that action true of the real track. Off the
+	// worker goroutine: it polls for the rescan to finish and the worker must
+	// stay free to take the next download.
+	if facade != nil {
+		go facade.reconcile()
+	}
 }
 
 // emitItemProgress relays per-item byte progress to SSE clients, throttled so a
