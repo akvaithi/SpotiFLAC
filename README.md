@@ -4,9 +4,12 @@ A **headless Docker rebuild** of [afkarxyz/SpotiFLAC](https://github.com/afkarxy
 this fork's upstream base. The original is a Wails desktop app; this repo replaces
 that GUI with an HTTP server + embedded web UI, so it runs unattended on a home
 server instead of a laptop. Paste a Spotify track/album/playlist URL (or search),
-and it lands as a lossless FLAC on a mounted volume — used as the acquisition
-backend for [Harmony](https://github.com/akvaithi/Harmony), a native macOS client
-for a Navidrome + SpotiFLAC stack, but works standalone through its own web UI too.
+and it lands as a lossless FLAC on a mounted volume.
+
+It also serves a **Subsonic API** at `/rest/*` that reverse-proxies Navidrome, so
+an ordinary unmodified Subsonic client — Cassette, Amperfy, Arpeggi — can search
+the Spotify catalog and download a track to the server by favouriting it. See
+[`SUBSONIC-FACADE.md`](SUBSONIC-FACADE.md).
 
 > Personal, self-hosted tooling — see [`README-WEB.md`](README-WEB.md) for the full
 > architecture and [`SETUP.md`](SETUP.md) for a from-scratch ZimaOS/Docker walkthrough.

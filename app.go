@@ -1017,9 +1017,8 @@ func (a *App) GetDefaults() map[string]string {
 	}
 }
 
-// GetFlacItStatus proxies flacit-gateway's health endpoint so the web UI and
-// Harmony can show Telegram login state without needing their own gateway
-// address logic. Never returns an RPC error — a down/misconfigured gateway is
+// GetFlacItStatus proxies flacit-gateway's health endpoint so any client can
+// show Telegram login state without needing its own gateway address logic. Never returns an RPC error — a down/misconfigured gateway is
 // data to render ("not logged in", "unreachable"), not an exceptional failure.
 func (a *App) GetFlacItStatus() map[string]interface{} {
 	gatewayURL := backend.GetFlacItGatewayURL()

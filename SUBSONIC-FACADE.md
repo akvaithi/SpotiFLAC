@@ -1,33 +1,31 @@
 # DESIGN — the Subsonic facade
 
-**Status:** built in `subsonic.go` and **deployed with `SUBSONIC_FACADE: inject`**.
-Phase 1 (pure proxy) passed on the shipped macOS Cassette. Phases 2–6 are verified
-server-side against real Navidrome but **not yet exercised through the app**, and
-phase 7 (iOS) is untouched.
+**Status:** built, deployed with `SUBSONIC_FACADE=inject`, and **verified end to end
+through unmodified shipped clients** — Cassette (iOS + macOS), Amperfy and Arpeggi.
+Search → favourite → FLAC on the server → indexed by Navidrome → the favourite
+applied to the real track.
 **Date:** 2026-07-31
-**Target client:** [Cassette](https://github.com/CassetteLab/cassette) (iOS + macOS),
-**unmodified official builds**.
 
-Injection is opt-in: `SUBSONIC_FACADE=inject`. Unset (the default) is the phase-1
-pure reverse proxy, which is what should go to the box first.
+Injection is opt-in: `SUBSONIC_FACADE=inject`. Unset is a pure reverse proxy, which is
+what any new deployment should run first — if the pass-through is not invisible,
+nothing built on top of it matters.
 
 ---
 
 ## 0. The problem this solves
 
-Harmony is macOS-only. Cassette is a native iOS **and** macOS Subsonic client that
-is better than Harmony at everything except the one thing Harmony exists for: the
-acquisition loop, where `+` on a track that isn't in the library means *download the
-lossless file to the server*.
+The library lives on a Navidrome server and is filled by SpotiFLAC. What was missing
+was the loop between them from an ordinary phone: seeing a track you *don't* own and
+saying "put that in my library" without opening a separate tool.
 
-Cassette has no concept of a track it doesn't own. Its only user-configurable
+No Subsonic client has a concept of a track it doesn't own — Cassette included. Its only user-configurable
 external hook is `ExternalReleaseProvider` — a URL template with a `%s` placeholder
 that opens a **browser**. There is no plugin system, no download-provider protocol,
 nothing that can be pointed at SpotiFLAC's RPC surface.
 
 Cassette speaks exactly one protocol: Subsonic / OpenSubsonic. Therefore:
 
-> **If the acquisition loop is going to reach an unmodified Cassette, it has to be
+> **If the acquisition loop is going to reach an unmodified client, it has to be
 > expressed in Subsonic verbs, and every line of code that does so has to live on
 > the server.**
 
@@ -70,7 +68,7 @@ exist only because of them.
 
 ## 2. System shape
 
-Today:
+Before:
 
 ```
 Cassette ──────────────────────────────► Navidrome :4533
@@ -78,7 +76,7 @@ SpotiFLAC web UI ──► SpotiFLAC :8080 ──► flacit-gateway :8082 ──
                           └──────────► /downloads ──► Navidrome rescan
 ```
 
-Proposed:
+After:
 
 ```
                      ┌──────────────────────────────────────────┐
@@ -133,25 +131,25 @@ in a future release, passes through unmodified and keeps working.
 
 ### 3.1 This is not Cassette-specific
 
-Nothing in the facade knows what client is talking to it. Cassette is the *target*,
-not a dependency — the contract is the Subsonic protocol, so **any** Subsonic client
-pointed at SpotiFLAC gets the same acquisition loop: `↓` rows in search, star to
-download. Symfonium, Amperfy, substreamer, play:Sub, Feishin, the CLI clients — all of
-them, on any platform, with no per-client work. That is the main structural payoff of
-solving this at the protocol layer instead of forking an app.
+Nothing in the facade knows what client is talking to it. The contract is the Subsonic
+protocol, so any Subsonic client pointed at SpotiFLAC gets the same acquisition loop.
+**Verified in three: Cassette (iOS + macOS), Amperfy and Arpeggi.** That is the
+structural payoff of solving this at the protocol layer instead of forking an app.
 
-Three real limits, all in the *injection* path only — pass-through is universal:
+Getting from one client to three took three fixes, and every one of them was a wrong
+assumption on this side rather than a client quirk — all three were found by reading
+the request log, and none by reasoning about the code:
 
-- **JSON only.** `f=xml` is forwarded untouched rather than rewritten. An XML client
-  gets a fully working library and no `↓` rows.
-  **Confirmed in the field 2026-07-31: Amperfy and Arpeggi both show library results
-  only.** Amperfy calls `search3` like everyone else but parses XML
-  (`ResponseError(type: .xml…)` in `SubsonicServerApi.swift`) and never sends
-  `f=json`, so injection is skipped. This is the limit doing what it says, not a bug —
-  but note the practical shape of it: **acquisition works in Cassette and in nothing
-  else tested.** The "any Subsonic client" claim in this section is about the
-  *protocol* being the right seam; it is not a statement that every client is
-  currently served.
+- **JSON *and* XML.** Injection was originally gated on `f=json`. Subsonic's default
+  format is XML when `f` is absent, which is what Amperfy and Arpeggi use, so
+  acquisition worked in exactly one app. See §5.1a.
+- **`songOffset=0` is not paging.** Those two clients send it on every search; the
+  guard tested the parameter's presence rather than its value.
+- **No colon in the cover id.** Arpeggi splits `coverArt` on `:` and requests the
+  bare remainder, so artwork silently 404'd.
+
+One limit remains, in the *injection* path only — pass-through is universal:
+
 - **GET only.** A client that submits `search3` over the `formPost` extension gets no
   injection, for the same reason: the parameters are in the body, not the URL. Star
   and playlist writes over POST *are* handled.
@@ -499,7 +497,7 @@ Two independent layers, and they must not be confused:
   mux.HandleFunc("/rest/", handleSubsonic(app))   // no requireAPIToken
   ```
 
-  Harmony's token stays in force for `/api/rpc/` and `/api/events`, unchanged.
+  The token stays in force for `/api/rpc/` and `/api/events`, unchanged.
 
 If a shared secret on `/rest/*` is wanted later, Cassette's **custom HTTP headers**
 feature (built for Cloudflare Access / Authelia) can carry one — configured in the
@@ -528,29 +526,27 @@ anything else untouched rather than trying to rewrite XML.
 
 ---
 
-## 10. What this does *not* recover from Harmony
+## 10. What this design does not give you
 
-Stated plainly so the trade is made with open eyes. Switching to Cassette gives up:
+Stated plainly so the trade is made with open eyes. A Subsonic client driven this way
+does not get:
 
-- **The on-device recommender** — FoundationModels + Accelerate DSP acoustic ranking,
-  "Picked for you", the prompt box, track radio. Not replicable through a Subsonic
-  facade at all. The substitute is ListenBrainz (§11.1–11.2): scrobbling, similar
-  artists, fresh releases. Note this is a real downgrade in *kind* — Harmony ranked
-  candidates on measured acoustic features, ListenBrainz ranks on what other people
-  listened to. Nothing on the table restores the former.
+- **Recommendations ranked on the audio itself.** Nothing here can rank candidates
+  on measured acoustic features; the substitute is ListenBrainz (§11.1–11.2), which
+  ranks on what other people listened to. A different kind of answer, not just a
+  worse one.
 - **Charts / New Releases** from Spotify.
-- **Spotify playlist and album *import*** — though this one is recoverable
-  server-side and needs no client support: SpotiFLAC can create the playlist in
-  Navidrome directly, add what it owns, and enqueue the rest. Worth doing as a
-  separate piece of work.
-- **Ownership badges everywhere.** Cassette will show `↓` rows in search and nothing
-  else; there is no "you own 8 of these 12 tracks" on an artist page.
+- **Spotify playlist and album *import*** — recoverable server-side and needing no
+  client support: SpotiFLAC can create the playlist in Navidrome directly, add what
+  it owns, and enqueue the rest. Worth doing as a separate piece of work.
+- **Ownership badges everywhere.** `↓` rows appear in search and nowhere else; there
+  is no "you own 8 of these 12 tracks" on an artist page.
 - **Library maintenance UI** — `EnrichLibrary`, `FindDuplicates`, trash. These stay
   in SpotiFLAC's web UI, reachable from any browser including the phone's.
 
 And a warning about what Cassette will look like on day one: on Navidrome 0.61.2
-`getSimilarArtists2` **404s** and `getTopSongs` returns nothing (verified during
-Harmony's Phase 3). Cassette's `SubsonicRecommendationProvider` will therefore come
+`getSimilarArtists2` **404s** and `getTopSongs` returns nothing (verified against this
+server). Cassette's `SubsonicRecommendationProvider` will therefore come
 back empty, and Discover will look broken until the companion services in §11 are
 connected. Those are prerequisites of the switch, not facade concerns.
 
@@ -590,8 +586,7 @@ Nothing exists yet — the Keychain has no `listenbrainz` entry.
    `app.cassette.server-credentials`) — the entry above is the operator's record.
 4. Scrobbling goes **only** through Cassette. Do **not** also enable Navidrome's
    ListenBrainz agent: Navidrome relays scrobbles itself, and running both
-   double-counts every listen and poisons the recommendation signal. This is the same
-   rule Harmony follows.
+   double-counts every listen and poisons the recommendation signal.
 
 ### 11.2 The Spotify listening history — seeding the cold start
 
@@ -599,8 +594,8 @@ This is the piece that makes 11.1 useful on day one instead of in six months, an
 it's the reason to do it in this order.
 
 A fresh ListenBrainz account has no history, so Similar Artists and Fresh Releases
-have nothing to reason about. The extended streaming history is already on disk at
-`~/Developer/Harmony/Spotify Extended Streaming History/` — **`Streaming_History_Audio_*.json`, 2020 through 2026, eleven files.**
+have nothing to reason about. The extended streaming history export is already on disk —
+**`Streaming_History_Audio_*.json`, 2020 through 2026, eleven files.**
 
 **ListenBrainz has imported Spotify extended streaming history natively since August
 2025**; no third-party importer is needed. Upload the audio JSONs (not the
@@ -609,8 +604,8 @@ have nothing to reason about. The extended streaming history is already on disk 
 Two notes:
 - Filter plays under 30 seconds, the conventional threshold — skips inflate an
   artist's weight without reflecting taste.
-- This is the *same corpus* Harmony's `TasteProfile` reads. Importing it into
-  ListenBrainz doesn't move it out of Harmony's reach; both can use it.
+- Importing it copies rather than moves: the export stays on disk and stays usable
+  for anything else.
 
 ### 11.3 AudioMuse-AI — **decided against, 2026-07-31**
 
@@ -633,8 +628,8 @@ the three companions, and ListenBrainz carries Discover without it.
   returns a real distribution (K-Pop 273, Pop 208, Hip Hop 46, …), because
   `EnrichLibrary`'s MusicBrainz pass wrote them into the files and Navidrome indexed
   them. So the candidate-gathering half of the fallback is healthy.
-  *(Note: this supersedes Harmony's `CLAUDE.md` note of 2026-07-29 that genres were
-  empty everywhere. That was true then and is not true now.)*
+  *(This supersedes an earlier note of 2026-07-29 that genres were empty everywhere.
+  That was true then and is not true now.)*
 - **Mood ranking is weak**, because `bpm` is `0` and `moods` is `[]` on every song
   sampled. The provider will log `(0 tagged, 0 with BPM)` and rank on genre alone.
   Moods will be genre playlists wearing mood names.
@@ -661,12 +656,12 @@ Each phase is independently verifiable on the shipped app.
 | **1** | Pure reverse proxy at `/rest/*`, zero interception — **built** | Point the official macOS Cassette at SpotiFLAC. Everything works exactly as before: browse, play, star, playlists, lyrics, offline downloads. **No regression is the whole test.** |
 | **2** | `search3` injection + `getCoverArt` — **built** | `↓` rows appear below real results, with correct artwork, in the official app. Search latency unchanged when Spotify is slow. |
 | **3** | `star` / `unstar` trigger — **built** | Add to Favorites on a `↓` row → item appears in `GetQueue` → FLAC on disk → track is in Artists/Albums/Songs. |
-| **4** | Post-download reconciliation: star the real track — **built, untested end to end** | The favourite points at a real playable track; the `sf:` record is gone after a sync. |
-| **5** | `updatePlaylist` / `createPlaylist` + destination table — **built, untested end to end** | Add to Playlist on a `↓` row acquires *and* lands in the chosen playlist after the rescan. |
-| **6** | `stream` intercept — **built** | Pressing play on a `↓` row enqueues and errors cleanly rather than hanging. |
-| **7** | iOS confirmation | Install the TestFlight build, repeat phases 1–6 end to end on the phone. |
+| **4** | Post-download reconciliation: star the real track — **done** | Confirmed on *Hair Salon*: `starred=2026-07-31T13:53:52Z` on the real track, 5s after Navidrome imported it. |
+| **5** | `updatePlaylist` / `createPlaylist` + destination table — **built, not exercised through a client** | Add to Playlist on a `↓` row acquires *and* lands in the chosen playlist after the rescan. |
+| **6** | `stream` intercept — **done** | Pressing play on a `↓` row enqueues and errors cleanly rather than hanging. |
+| **7** | Other clients — **done** | Amperfy and Arpeggi verified after the three fixes in §3.1. |
 
-Phase 1 is the load-bearing one and should sit in production for several days before
+All of this is deployed. Phase 1 is the load-bearing one and should sit in production before
 phase 2 lands. If phase 1 is not perfectly transparent, nothing after it matters.
 
 **Phase 0 is §11**, and it comes before all of this. Connect ListenBrainz, import the
@@ -701,11 +696,9 @@ player worth switching to? If the answer is no, none of phases 1–7 need writin
 ## 14. Open questions
 
 1. **Ownership filtering fidelity.** `MatchLibrary` is stricter than Navidrome and
-   produced a 26-of-36 false-negative rate on a playlist import during Harmony's
-   work. Should §5.1 instead ask *Navidrome* whether the track is owned — a
-   `search3` on title+artist against the results already in hand — the way Harmony's
-   `refreshOwnershipIndex` does? That is more accurate and costs nothing extra, and
-   is probably the right answer.
+   was once measured producing a 26-of-36 false-negative rate on a playlist import.
+   §5.1 now unions it with Navidrome's own returned rows, which covers the common
+   case, but a track owned and *not* in that page of results can still be offered.
 2. **Does `AddMusicSheet` multi-select reach search results?** If it does, album-scale
    acquisition is one flow rather than ten context menus, and §7's second consequence
    softens considerably. Needs checking against the shipped app.

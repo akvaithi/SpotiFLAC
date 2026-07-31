@@ -23,9 +23,9 @@ import (
 //
 // Both belong on the server rather than in a client cache. Navidrome reads tags,
 // so once a file carries lyrics its `getLyricsBySongId` works for every client —
-// Harmony, the web UI, a phone — and genres populate Navidrome's own index, which
-// is empty today because every past download omitted `embed_genre`. A per-client
-// cache would solve it once per device and never for anything else.
+// Cassette on the phone, the bundled web UI, anything else pointed at the same
+// server — and genres populate Navidrome's own index. A per-client cache would
+// solve it once per device and never for anything else.
 //
 // Sources are free and keyless: LRCLIB for synced lyrics, MusicBrainz for genre
 // tags. Both are public services run on donations, so both are rate limited here.
@@ -33,8 +33,8 @@ import (
 type EnrichOptions struct {
 	Lyrics bool `json:"lyrics"`
 	Genres bool `json:"genres"`
-	// Covers embeds front-cover artwork. Needed because the Harmony backfill
-	// enqueued 634 tracks straight from a Spotify listening-history export, which
+	// Covers embeds front-cover artwork. Needed because a bulk backfill of 634
+	// tracks was enqueued straight from a Spotify listening-history export, which
 	// carries no image URLs — so `cover_url` was empty, nothing was embedded, and
 	// Navidrome serves its own grey placeholder for roughly half the library.
 	Covers bool `json:"covers"`
@@ -70,7 +70,7 @@ var (
 const (
 	musicBrainzDelay = 1100 * time.Millisecond
 	lrclibDelay      = 250 * time.Millisecond
-	enrichUserAgent  = "SpotiFLAC-Harmony/1.0 ( https://github.com/akvaithi/SpotiFLAC )"
+	enrichUserAgent  = "SpotiFLAC/1.0 ( https://github.com/akvaithi/SpotiFLAC )"
 	// Files touched within this window may still be mid-write by the download
 	// worker; tagging one while it's being written would corrupt it.
 	enrichQuietPeriod = 2 * time.Minute

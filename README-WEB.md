@@ -48,9 +48,13 @@ volumes:
 | `DOWNLOAD_DIR` | `/downloads` | Output directory (mount a volume) |
 | `CONFIG_DIR` | `/config` | App data: history, settings, library index |
 | `FLACIT_GATEWAY_URL` | `http://172.17.0.1:8082` | flacit-gateway address — must be docker0's host gateway + published port, never a container IP (those shift on recreate) |
+| `API_TOKEN` | unset | If set, `/api/*` requires a bearer token. Unset keeps the old open behaviour. Never gates `/rest/*`. |
+| `NAVIDROME_URL` / `_USER` / `_PASSWORD` | unset | Rescan hook, and the upstream for the Subsonic facade. Can also live in `config.json`. |
+| `SUBSONIC_FACADE` | unset | `inject` turns on catalog injection at `/rest/*`. Unset is a pure reverse proxy. |
+| `SUBSONIC_FACADE_DEBUG` | unset | Any value logs each `/rest/*` request (credentials elided). Off by default; it is verbose. |
 
-No authentication is built in — run it on a trusted LAN, or put it behind your
-own reverse-proxy auth / VPN if you expose it.
+Set `API_TOKEN` if you expose this, or keep it on a trusted LAN / behind your own
+reverse-proxy auth or VPN.
 
 ## What the UI covers
 
@@ -76,7 +80,14 @@ web/ (embedded SPA) ──HTTP/SSE──► main.go ── rpc.go (reflection RP
                                            └─ backend/flacit.go ──HTTP──► flacit-gateway
                                                                           (Telethon/Flask,
                                                                            separate container)
+
+Subsonic client ────/rest/*────► subsonic.go ──► Navidrome        (everything, proxied)
+                                            └──► EnqueueDownloads (star a ↓ row)
 ```
+
+A second front door: `subsonic.go` reverse-proxies Navidrome and injects Spotify
+catalog results into `search3`, so favouriting one downloads it to the server.
+Full design, measurements and known gaps in [`SUBSONIC-FACADE.md`](SUBSONIC-FACADE.md).
 
 ## Limitations / notes
 
@@ -85,6 +96,8 @@ web/ (embedded SPA) ──HTTP/SSE──► main.go ── rpc.go (reflection RP
   stateful conversation).
 - **16-bit/44.1kHz FLAC only** — this is what Deezer serves via the bot;
   there's no hi-res tier and no fallback source if a track isn't on Deezer.
+- **Acquisition takes 1–3 minutes**, essentially all of it waiting on the bot to
+  reply (measured 6s–178s). Nothing on this side is a meaningful share of it.
 - Depends on the flacit-gateway's Telegram session staying authenticated and
   `@deezload2bot`'s channel membership staying valid.
 - Native file/folder pickers are removed; use the Files browser instead.

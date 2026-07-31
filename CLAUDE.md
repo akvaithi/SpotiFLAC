@@ -29,6 +29,8 @@ doesn't carry fails into the queue's failed list rather than retrying elsewhere.
   `emitEvent(name, data)`.
 - `queue.go` + `backend/queue_store.go` — durable download queue (see below).
 - `navidrome.go` — Subsonic rescan trigger + status (see below).
+- `subsonic.go` — the **Subsonic facade** at `/rest/*` (see below, and
+  `SUBSONIC-FACADE.md` for the full design).
 - `auth.go` — optional `API_TOKEN` bearer auth, off by default (see below).
 - `discovery.go` + `backend/discovery.go` — related artists / band members.
 - `library.go` — dedup index (see below).
@@ -93,9 +95,18 @@ IP gotcha below) — recreating containers silently invalidates it.
   finish flips `is_downloading` false for all of them. `CancelQueueItem` on the
   active item calls `ForceStopActiveDownloads`, which cancels *every* in-flight
   download because the cancellation scope is shared.
-- **Most of a download is the bot, not the transfer** (measured 2026-07-31):
-  the gateway→server copy of an 11MB FLAC is ~0.05s, while `@deezload2bot`
-  takes 5–13s to reply. Neither the box (39MB RSS, 0% CPU, no memory pressure)
+- **Most of a download is the bot, not the transfer** (re-measured 2026-07-31
+  from the gateway's own log, bracketing `POST /fetch` → `GET /fetch/<job>/file`):
+  **6s, 97s, 118s, 178s**. The gateway→server copy of an 11MB FLAC is ~0.05s and
+  Navidrome's rescan is ~370ms, so essentially all of it is `@deezload2bot`
+  replying. An earlier note here said 5–13s; that is still a *fast* reply but no
+  longer the range. Two things were ruled out by measurement and shouldn't be
+  re-suspected: LRCLIB answers in 0.3–0.6s (its five-call chain looks alarming and
+  isn't the cost, and it runs concurrently with the download), and MusicBrainz's
+  1.1s courtesy delay is an order of magnitude too small to matter.
+  `flacit-gateway`'s `FLAC_RETRY_AFTER`/`FLAC_TIMEOUT` were retuned 35s/120s →
+  90s/270s to match: at 35s the resend fired on nearly every download, which both
+  doubled load on the bot and let a duplicate reply be consumed by the *next* job. Neither the box (39MB RSS, 0% CPU, no memory pressure)
   nor Navidrome (~500ms scan, plus its own filesystem watcher) is a factor.
   Two consequences are already handled and shouldn't be re-litigated:
   `EnqueueDownloads` **prewarms the Deezer link** through
@@ -187,6 +198,42 @@ IP gotcha below) — recreating containers silently invalidates it.
   library dir since it's RPC-reachable, and the scan walk skips dot-directories
   so trashed files don't reappear. `GetLibraryTrash`/`EmptyLibraryTrash` manage
   the trash. UI lives in the Library tab.
+- **The Subsonic facade** (`subsonic.go`, full design in `SUBSONIC-FACADE.md`):
+  SpotiFLAC reverse-proxies Navidrome at `/rest/*` so an **unmodified** Subsonic
+  client reaches the acquisition loop. Point the client at SpotiFLAC instead of
+  Navidrome; it must *front* Navidrome, not sit beside it, because clients keep one
+  active server. Default is a transparent proxy; `SUBSONIC_FACADE=inject` turns on
+  injection. Verified working in Cassette (iOS + macOS), Amperfy and Arpeggi.
+  Rules that cost real debugging time and shouldn't be relearned:
+  - **Everything fails open.** Any error in an intercept falls back to proxying.
+    It sits in the path of the whole library: a bug must degrade to "feature
+    missing", never "music stopped". Never write to the response before the last
+    fallible step.
+  - **Inject into `search3` and nowhere else.** Clients cache aggressively
+    (SwiftData in Cassette), and a virtual id in a cached list is a permanently
+    broken row the server can't reach. `FavoriteRecord` is the one exception, and
+    only because `getStarred2` reconciles it.
+  - **Both JSON and XML**, and Subsonic defaults to XML when `f` is absent — that
+    default is what Amperfy and Arpeggi use. XML rows are *spliced* in, never
+    re-serialised, so upstream bytes survive byte for byte.
+  - **`songOffset=0` is not paging.** Test the offset's value, not its presence;
+    the presence check silently disabled acquisition for two clients.
+  - **No colon in the cover id** (`sf-cover-`, not `sf-cover:`) — Arpeggi splits on
+    it and requests the bare remainder. Song ids keep `sf:` and survive intact.
+  - **One search budget, not an adaptive one.** Waiting less when the library
+    already answered well seems clever and produced "works on my phone, not my
+    desktop": the real variable was the query, and owning some of an artist is the
+    most ordinary reason to want the rest.
+  - **An in-flight row stays visible** as `⏳` rather than being suppressed —
+    otherwise a track is in neither list for the ~2 minutes before Navidrome
+    indexes it, and reads as lost.
+  - Reconciliation matches with `songMatches`, **not** `nameKey`: SpotiFLAC tags
+    multiple artists with `•` and `firstArtist` doesn't split on it. Do not "fix"
+    `firstArtist` — it also feeds duplicate detection, where collapsing an artist
+    list would offer to delete real music.
+  - **Known gap:** the gateway checks a returned document *is* a FLAC, never that
+    it's the one requested, so a duplicate reply can in principle be attributed to
+    the next job. Retuning the resend made it unlikely, not impossible.
 - **Gateway URL must not be a container IP**: both containers run
   `network_mode: bridge` (the default docker0 bridge), so container IPs shift on
   every recreate and container-name DNS doesn't resolve. Use
