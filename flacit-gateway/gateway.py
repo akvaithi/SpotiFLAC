@@ -54,8 +54,25 @@ CONFIG_DIR = os.path.dirname(SESSION_FILE) or "/config"
 JOBS_DIR = os.path.join(CONFIG_DIR, "jobs")
 FLAC_QUALITY_FLAG = os.path.join(CONFIG_DIR, ".flac_quality_set")
 
-FLAC_TIMEOUT = 120          # total seconds to wait for the bot's FLAC document
-FLAC_RETRY_AFTER = 35       # resend the link once if nothing has arrived by then
+# Both of these were tuned for a bot that answered in 5-13s. Measured again on
+# 2026-07-31 from this service's own request log, bracketing POST /fetch to
+# GET /fetch/<job>/file: 6s, 97s, 118s, 178s. The old values were badly wrong
+# against that range, in two compounding ways.
+#
+#   - At 35s the resend fired on essentially *every* download, so the Telegram
+#     log filled with the same track requested twice. That is wasted work
+#     against the very service whose slowness is the whole cost, and it opens a
+#     correctness hole: the duplicate reply arrives after this job is finished,
+#     is newer than the *next* job's `check_after`, and can be picked up as that
+#     job's document — delivering the wrong track under the right name.
+#   - At 120s a 178s reply is scored a failure, so SpotiFLAC's queue retried the
+#     whole fetch (up to queueMaxAttempts=3), asking the bot yet again.
+#
+# 90s is comfortably past the observed slow case, so a resend now means the
+# request was genuinely dropped. 270s stays under backend/flacit.go's
+# flacItJobDeadline of 5 minutes, which must remain the outer bound.
+FLAC_TIMEOUT = 270          # total seconds to wait for the bot's FLAC document
+FLAC_RETRY_AFTER = 90       # resend the link once if nothing has arrived by then
 JOB_REAP_AFTER = 600        # drop finished jobs (and their temp files) after this
 DOWNLOAD_CONNECTIONS = 16
 PART_SIZE = 512 * 1024
