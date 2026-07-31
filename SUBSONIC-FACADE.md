@@ -144,6 +144,14 @@ Three real limits, all in the *injection* path only — pass-through is universa
 
 - **JSON only.** `f=xml` is forwarded untouched rather than rewritten. An XML client
   gets a fully working library and no `↓` rows.
+  **Confirmed in the field 2026-07-31: Amperfy and Arpeggi both show library results
+  only.** Amperfy calls `search3` like everyone else but parses XML
+  (`ResponseError(type: .xml…)` in `SubsonicServerApi.swift`) and never sends
+  `f=json`, so injection is skipped. This is the limit doing what it says, not a bug —
+  but note the practical shape of it: **acquisition works in Cassette and in nothing
+  else tested.** The "any Subsonic client" claim in this section is about the
+  *protocol* being the right seam; it is not a statement that every client is
+  currently served.
 - **GET only.** A client that submits `search3` over the `formPost` extension gets no
   injection, for the same reason: the parameters are in the body, not the URL. Star
   and playlist writes over POST *are* handled.
