@@ -55,24 +55,23 @@ const (
 	// a short one.
 	maxInjectedSongs = 10
 
-	// How long a search3 will wait for Spotify, and it is two numbers because
-	// the right answer depends on what the library already said.
+	// How long a search3 waits for Spotify. One number, deliberately.
 	//
-	// Measured 2026-07-31: a Spotify catalog search costs 1.4–1.7s warm, and
-	// the limit doesn't move it — it's the round trip to the partner API, not
-	// the payload. A single budget therefore can't win. At 1.5s it lands on the
-	// median and injection becomes a coin flip; at 2.5s every search in the app
-	// slows to Spotify's speed, including searches for music already owned,
-	// which is a real regression on the common case.
+	// This was briefly two: 250ms when Navidrome had already returned 5+ songs,
+	// 2.5s when it came up short, on the theory that a well-answered search does
+	// not need acquisition rows and should not pay for them. That theory is
+	// wrong, and it produced a bug that read as "downloads work on my phone but
+	// not on my desktop" — the real variable was the *query*. Searching "texas"
+	// returned exactly 5 owned songs and so silently lost its acquisition rows,
+	// while "hair salon" returned 1 and kept them. Owning some of an artist is
+	// the most ordinary reason to want the rest, so the premise was backwards as
+	// well as inconsistent.
 	//
-	// So: if Navidrome already answered well, take whatever is cached and get
-	// out of the way. If it came up short, that is exactly when acquisition is
-	// the point, and waiting is what the user wants.
-	spotifyFastBudget = 250 * time.Millisecond
-	spotifySlowBudget = 2500 * time.Millisecond
-
-	// Below this many real hits, the library is treated as having come up short.
-	librarySatisfied = 5
+	// A Spotify search costs 1.4-1.7s warm (measured; the requested limit does
+	// not move it, it is the round trip). So a novel query now costs about that,
+	// and the cache below makes every repeat instant. Predictable and slightly
+	// slow beats fast and intermittent.
+	spotifySearchBudget = 2500 * time.Millisecond
 
 	// Repeat searches are common (refining a query, coming back to a screen),
 	// and the catalog does not change minute to minute.
@@ -294,7 +293,7 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	spotifyCh := make(chan []backend.SearchResult, 1)
 	if !hit {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), spotifySlowBudget)
+			ctx, cancel := context.WithTimeout(context.Background(), spotifySearchBudget)
 			defer cancel()
 			resp, err := backend.SearchSpotify(ctx, query, maxInjectedSongs*3)
 			if err != nil || resp == nil {
@@ -312,14 +311,13 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Both formats need the same two facts before deciding anything: how many
-	// songs the library returned, and what they were (so a catalog hit for one
-	// of them isn't offered twice).
+	// Both formats need the same fact before injecting: what the library
+	// already returned, so a catalog hit for one of those rows is not offered
+	// alongside it.
 	var (
 		envelope  map[string]any
 		result    map[string]any
 		songs     []any
-		songCount int
 		ownedKeys map[string]bool
 	)
 
@@ -343,28 +341,23 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 			resp["searchResult3"] = result
 		}
 		songs, _ = result["song"].([]any)
-		songCount = len(songs)
 		ownedKeys = ownedKeySetJSON(songs)
 	} else {
 		var ok bool
-		ownedKeys, songCount, ok = ownedKeySetXML(body)
+		ownedKeys, _, ok = ownedKeySetXML(body)
 		if !ok {
 			writeRaw(w, ct, body)
 			return
 		}
 	}
 
-	// How long to wait is decided *after* seeing what the library returned —
-	// see the budget constants. A well-answered search never pays for Spotify.
+	// The wait does not depend on how well the library answered — see the
+	// budget constant for why that was tried and abandoned.
 	tracks := cached
 	if !hit {
-		budget := spotifySlowBudget
-		if songCount >= librarySatisfied {
-			budget = spotifyFastBudget
-		}
 		select {
 		case tracks = <-spotifyCh:
-		case <-time.After(budget):
+		case <-time.After(spotifySearchBudget):
 		}
 	}
 	if len(tracks) == 0 {
