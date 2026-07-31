@@ -251,18 +251,23 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := strings.TrimSpace(q.Get("query"))
 
-	// Two reasons to stay out of the way entirely:
+	// Three reasons to stay out of the way entirely:
 	//   - POST (the formPost extension): the body carries the params, not the URL.
 	//   - An empty query is not a search. Cassette's allSongs() enumerates the
 	//     whole library through search3 with an empty query and songOffset
 	//     paging; injecting there would scatter placeholders through the
 	//     library listing and into everything that caches it.
+	//   - Paging past the first page: acquisition rows belong at the end of the
+	//     first set of results, not repeated on every page.
 	//
-	// Format is *not* a reason any more. Both JSON and XML are injected, because
-	// Amperfy and Arpeggi showed library-only results in the field: they call
-	// search3 like everyone else but parse XML, and skipping non-JSON meant
-	// acquisition worked in exactly one client.
-	if r.Method != http.MethodGet || query == "" || q.Get("songOffset") != "" {
+	// That last one must test the offset's *value*, not its presence. Amperfy
+	// and Arpeggi send `songOffset=0` on every search — perfectly ordinary — and
+	// an earlier version skipped on the parameter being set at all, which
+	// silently disabled acquisition for both of them.
+	//
+	// Format is not a reason: both JSON and XML are injected. Subsonic defaults
+	// to XML when `f` is absent, which is what these two clients rely on.
+	if r.Method != http.MethodGet || query == "" || positiveOffset(q.Get("songOffset")) {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
@@ -382,6 +387,16 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRaw(w, ct, out)
+}
+
+// positiveOffset reports whether a paging parameter asks for anything past the
+// first page. An absent, empty, zero or unparseable value all mean "page one".
+func positiveOffset(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	n, err := strconv.Atoi(raw)
+	return err == nil && n > 0
 }
 
 // virtualSong is the one description of an acquirable row. It exists so the

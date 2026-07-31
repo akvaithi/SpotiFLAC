@@ -112,3 +112,19 @@ func TestInjectXMLRefusesUnknownShape(t *testing.T) {
 		t.Error("injected into a response with no searchResult3")
 	}
 }
+
+// songOffset=0 is what Amperfy and Arpeggi send on every search. Treating its
+// presence as "this is a paging request" silently disabled acquisition for both.
+func TestPositiveOffset(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{
+		{"", false}, {"0", false}, {"00", false}, {"junk", false}, {"-1", false},
+		{"1", true}, {"500", true},
+	} {
+		if got := positiveOffset(c.in); got != c.want {
+			t.Errorf("positiveOffset(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
