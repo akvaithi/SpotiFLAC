@@ -41,7 +41,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request, send_file
-from telethon import TelegramClient, errors, functions, types
+from telethon import TelegramClient, errors, events, functions, types
 from telethon.tl.types import DocumentAttributeFilename, ReplyInlineMarkup
 
 API_ID = int(os.environ.get("TG_API_ID", "2040"))
@@ -88,6 +88,9 @@ client = None
 
 client = None
 _fetch_queue = None
+# Set by the update handler whenever @deezload2bot sends anything, so the wait
+# in _process_fetch wakes the moment a reply lands instead of on a poll tick.
+_bot_activity = None
 
 
 async def _create_client():
@@ -99,9 +102,12 @@ async def _create_client():
     # on the main thread (even while passing `loop=_loop` to steer it) leaves
     # its internals split across two event-loop contexts, and `connect()` then
     # hangs forever, also silently.
-    global client, _fetch_queue
+    global client, _fetch_queue, _bot_activity
     client = TelegramClient(_SESSION_NAME, API_ID, API_HASH)
     _fetch_queue = asyncio.Queue()
+    # Same loop-affinity trap as the Queue above: asyncio.Event binds to the
+    # loop that is current when it is constructed.
+    _bot_activity = asyncio.Event()
 
 
 _await(_create_client())
@@ -333,6 +339,11 @@ async def _process_fetch(job_id):
 
     while time.time() - start < FLAC_TIMEOUT:
         _check_not_cancelled(job_id)
+        # Cleared *before* the scan, not after: a reply arriving while we are
+        # mid-scan then leaves the flag set, and the wait below returns at once
+        # instead of sleeping through a reply that is already sitting there.
+        _bot_activity.clear()
+
         async for msg in client.iter_messages(BOT, limit=10):
             if msg.date < check_after:
                 break
@@ -348,7 +359,16 @@ async def _process_fetch(job_id):
             except Exception:  # noqa
                 pass
             retried = True
-        await asyncio.sleep(2)
+
+        # The bot's reply is what we're waiting for, so wake on it rather than
+        # on a timer — this was a flat `sleep(2)`, which meant every fetch paid
+        # ~1s of dead time on average. The 2s ceiling is kept as a backstop so a
+        # missed or dropped update degrades to the old polling behaviour rather
+        # than hanging until FLAC_TIMEOUT.
+        try:
+            await asyncio.wait_for(_bot_activity.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
 
     if flac_msg is None or flac_msg.document is None:
         with jobs_lock:
@@ -591,10 +611,24 @@ def health():
 
 # ---------------------------------------------------------------- startup
 
+async def _register_bot_listener():
+    """Wake _process_fetch as soon as the bot sends anything.
+
+    Deliberately a dumb flag rather than the thing that picks the message: the
+    document still has to be found by the existing scan, which checks mime and
+    filename and ignores anything older than the link we sent. This only removes
+    the delay between the reply landing and that scan running.
+    """
+    @client.on(events.NewMessage(chats=BOT))
+    async def _on_bot_message(event):  # noqa
+        _bot_activity.set()
+
+
 def _startup():
     asyncio.run_coroutine_threadsafe(_fetch_worker(), _loop)
 
     _await(client.connect())
+    _await(_register_bot_listener())
     if _await(client.is_user_authorized(), timeout=15):
         print("flacit-gateway: Telegram session loaded.", flush=True)
         _await(_ensure_flac_quality())

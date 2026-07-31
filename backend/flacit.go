@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -233,14 +234,102 @@ func (f *FlacItDownloader) Download(
 	return expectedPath, nil
 }
 
+// Deezer link resolution is 0.7-3.5s of song.link/Deezer API round-trips, and
+// it sits on the critical path *before* the bot is even contacted. Since the
+// download worker is serial and each track takes several seconds, resolving the
+// next few tracks' links while the current one is in flight hides that cost
+// entirely — by the time the worker reaches them the answer is already cached.
+//
+// Entries are shared between the prewarm goroutine and the worker, so a link is
+// looked up once even when both want it at the same time: the second caller
+// blocks on the same `done` channel rather than firing a duplicate request.
+type deezerResolution struct {
+	done chan struct{}
+	url  string
+}
+
+var (
+	deezerResolutions   = map[string]*deezerResolution{}
+	deezerResolutionsMu sync.Mutex
+
+	// song.link has no documented rate limit and this code does no backoff, so
+	// concurrency is capped rather than letting a 600-track backfill open 600
+	// connections at once. Three is plenty to stay ahead of a serial worker.
+	deezerResolveSem = make(chan struct{}, 3)
+)
+
+// deezerResolutionsMax bounds the cache. Downloads are one-shot, so an entry is
+// dead weight once used; clearing wholesale is simpler than tracking ages and
+// costs at most one repeated lookup per track after a very long run.
+const deezerResolutionsMax = 5000
+
+// Indirected so the caching and concurrency behaviour above can be tested
+// without reaching song.link.
+var resolveDeezerOnce = func(spotifyID string) (string, error) {
+	return NewSongLinkClient().GetDeezerURLFromSpotify(spotifyID)
+}
+
+// ResolveDeezerURL returns the Deezer track URL for a Spotify id, blocking on an
+// in-flight lookup if one is already running. Empty string means no Deezer match.
+func ResolveDeezerURL(spotifyID string) string {
+	if spotifyID == "" {
+		return ""
+	}
+
+	deezerResolutionsMu.Lock()
+	entry, found := deezerResolutions[spotifyID]
+	if !found {
+		if len(deezerResolutions) >= deezerResolutionsMax {
+			deezerResolutions = map[string]*deezerResolution{}
+		}
+		entry = &deezerResolution{done: make(chan struct{})}
+		deezerResolutions[spotifyID] = entry
+	}
+	deezerResolutionsMu.Unlock()
+
+	if !found {
+		func() {
+			// Closed unconditionally: if the lookup panics, every caller
+			// blocked on this entry would otherwise wait forever.
+			defer close(entry.done)
+
+			deezerResolveSem <- struct{}{}
+			defer func() { <-deezerResolveSem }()
+
+			url, err := resolveDeezerOnce(spotifyID)
+			if err == nil {
+				entry.url = url
+				return
+			}
+			// A failure is not cached. song.link timeouts and rate limits are
+			// transient, and the queue retries a failed download — but it would
+			// hit this cache, skip the lookup, and fall back to the bare Spotify
+			// link every time, turning a blip into a permanent downgrade.
+			deezerResolutionsMu.Lock()
+			delete(deezerResolutions, spotifyID)
+			deezerResolutionsMu.Unlock()
+		}()
+	}
+
+	<-entry.done
+	return entry.url
+}
+
+// PrewarmDeezerURL starts a resolution without waiting for it.
+func PrewarmDeezerURL(spotifyID string) {
+	if spotifyID == "" {
+		return
+	}
+	go ResolveDeezerURL(spotifyID)
+}
+
 // resolveTrackURL prefers a Deezer track link over the Spotify one — the bot
 // resolves Deezer links directly with no ambiguity, whereas a bare Spotify
 // link relies on the bot's own (unverified) resolution. GetDeezerURLFromSpotify
 // already chains song.link's Deezer match, an ISRC lookup, and Deezer's ISRC
 // API as internal fallbacks, so there's nothing left to retry here.
 func (f *FlacItDownloader) resolveTrackURL(spotifyID string) string {
-	client := NewSongLinkClient()
-	if url, err := client.GetDeezerURLFromSpotify(spotifyID); err == nil && url != "" {
+	if url := ResolveDeezerURL(spotifyID); url != "" {
 		return url
 	}
 	return "https://open.spotify.com/track/" + spotifyID

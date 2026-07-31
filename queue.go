@@ -340,6 +340,12 @@ func (a *App) EnqueueDownloads(reqs []DownloadRequest) ([]string, error) {
 		}
 		ids = append(ids, rec.ID)
 		emitEvent("download:item", queueItemView(*rec))
+
+		// Start resolving the Deezer link now rather than when the worker gets
+		// here. The lookup is capped at 3 concurrent inside the backend, so a
+		// large batch queues up behind a serial worker that is several seconds
+		// per track — which is exactly enough for each link to be ready early.
+		backend.PrewarmDeezerURL(req.SpotifyID)
 	}
 
 	if worker != nil {
