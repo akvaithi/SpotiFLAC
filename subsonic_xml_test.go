@@ -128,3 +128,21 @@ func TestPositiveOffset(t *testing.T) {
 		}
 	}
 }
+
+// An acquisition must never be invisible. Between starring a row and Navidrome
+// indexing the file there is a ~2 minute window where the real track does not
+// exist yet; the placeholder has to stay, marked as in progress.
+func TestPendingRowStaysVisible(t *testing.T) {
+	pending := virtualSong{SpotifyID: "x", Title: "Hair Salon", Artist: "Megan Moroney", Pending: true}
+	fresh := virtualSong{SpotifyID: "y", Title: "Hair Salon", Artist: "Megan Moroney"}
+
+	if got := pending.jsonMap()["title"].(string); !strings.HasPrefix(got, "⏳") {
+		t.Errorf("pending row title = %q, want the in-progress marker", got)
+	}
+	if got := fresh.jsonMap()["title"].(string); !strings.HasPrefix(got, "↓") {
+		t.Errorf("acquirable row title = %q, want the download marker", got)
+	}
+	if !strings.Contains(pending.xmlElement(), "⏳") {
+		t.Error("XML rendering lost the pending marker")
+	}
+}

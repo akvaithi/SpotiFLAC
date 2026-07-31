@@ -409,12 +409,23 @@ type virtualSong struct {
 	Album     string
 	HasCover  bool
 	Duration  int // seconds
+	// Pending means the download is queued or running: the row stays visible
+	// so an acquisition never looks lost, but reads as in progress.
+	Pending bool
+}
+
+// marker distinguishes "you can fetch this" from "this is on its way".
+func (v virtualSong) marker() string {
+	if v.Pending {
+		return "⏳ "
+	}
+	return "↓ "
 }
 
 func (v virtualSong) jsonMap() map[string]any {
 	m := map[string]any{
 		"id":     virtualIDPrefix + v.SpotifyID,
-		"title":  "↓ " + v.Title,
+		"title":  v.marker() + v.Title,
 		"artist": v.Artist,
 		"album":  v.Album,
 		"isDir":  false,
@@ -444,7 +455,7 @@ func (v virtualSong) xmlElement() string {
 		b.WriteString(`"`)
 	}
 	attr("id", virtualIDPrefix+v.SpotifyID)
-	attr("title", "↓ "+v.Title)
+	attr("title", v.marker()+v.Title)
 	attr("artist", v.Artist)
 	attr("album", v.Album)
 	attr("isDir", "false")
@@ -463,7 +474,7 @@ func (v virtualSong) xmlElement() string {
 // virtualSongs turns Spotify hits into acquirable rows, dropping anything
 // already owned or already on its way.
 func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys map[string]bool) []virtualSong {
-	queued := f.queuedSpotifyIDs()
+	states := f.acquisitionStates()
 
 	// Two ownership signals, unioned. Navidrome's own results are the
 	// authority on what is playable, but its search only returned a page of
@@ -488,7 +499,19 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys m
 		if t.ID == "" || t.Name == "" {
 			continue
 		}
-		if indexed[i] || ownedKeys[nameKey(t.Name, t.Artists)] || queued[t.ID] {
+		if indexed[i] || ownedKeys[nameKey(t.Name, t.Artists)] {
+			continue
+		}
+
+		// A track already fetched is dropped — the real row is in the results
+		// beside it. One still in flight is *kept*, marked as pending.
+		//
+		// It used to be dropped too, and that made an acquisition disappear for
+		// the ~2 minutes between starring it and Navidrome indexing it: the
+		// placeholder was suppressed because it was queued, and the real track
+		// did not exist yet, so the track was in neither list and looked lost.
+		state := states[t.ID]
+		if state == backend.QueueCompleted {
 			continue
 		}
 
@@ -500,6 +523,7 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys m
 			Album:     t.AlbumName,
 			HasCover:  t.Images != "",
 			Duration:  t.Duration / 1000,
+			Pending:   state != "",
 		})
 	}
 	return out
@@ -606,21 +630,24 @@ func injectXMLSongs(body []byte, songs []virtualSong) ([]byte, bool) {
 	return nil, false
 }
 
-func (f *subsonicFacade) queuedSpotifyIDs() map[string]bool {
-	ids := map[string]bool{}
+// acquisitionStates maps spotify id -> queue status for anything this facade
+// has already been asked to fetch, so search can tell the three cases apart:
+// already here, on its way, or never asked for.
+func (f *subsonicFacade) acquisitionStates() map[string]string {
+	states := map[string]string{}
 	records, err := backend.GetQueueRecords()
 	if err != nil {
-		return ids
+		return states
 	}
 	for _, rec := range records {
 		switch rec.Status {
 		case backend.QueueQueued, backend.QueueDownloading, backend.QueueCompleted:
 			if rec.SpotifyID != "" {
-				ids[rec.SpotifyID] = true
+				states[rec.SpotifyID] = rec.Status
 			}
 		}
 	}
-	return ids
+	return states
 }
 
 // -----------------------------------------------------------------------------
@@ -869,7 +896,9 @@ func (f *subsonicFacade) acquire(spotifyID string, note func(*pendingAcquisition
 	f.pending[spotifyID] = p
 	f.mu.Unlock()
 
-	if f.queuedSpotifyIDs()[spotifyID] {
+	// Already fetched or already fetching: the promise above is recorded, but
+	// there is nothing new to enqueue.
+	if f.acquisitionStates()[spotifyID] != "" {
 		return nil
 	}
 
