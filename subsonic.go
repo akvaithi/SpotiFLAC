@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -71,6 +72,7 @@ type subsonicFacade struct {
 	proxy  *httputil.ReverseProxy
 	client *http.Client
 	inject bool
+	debug  bool
 
 	mu sync.Mutex
 	// spotifyID -> the search hit it came from, so getCoverArt and the
@@ -126,8 +128,9 @@ func initSubsonicFacade(app *App) *subsonicFacade {
 		proxy:  httputil.NewSingleHostReverseProxy(target),
 		// No timeout: /rest/stream is a long-lived body, and Range requests on
 		// a large FLAC are ordinary. The proxy handles those itself.
-		client:  &http.Client{Timeout: 20 * time.Second},
-		inject:  envOr("SUBSONIC_FACADE", "") == "inject",
+		client:      &http.Client{Timeout: 20 * time.Second},
+		inject:      envOr("SUBSONIC_FACADE", "") == "inject",
+		debug:       envOr("SUBSONIC_FACADE_DEBUG", "") != "",
 		seen:        map[string]backend.SearchResult{},
 		pending:     map[string]*pendingAcquisition{},
 		searchCache: map[string]cachedSearch{},
@@ -165,6 +168,45 @@ func (f *subsonicFacade) keepSpotifyWarm() {
 	}
 }
 
+// logSubsonicRequest records what a client actually sent, which is the only way
+// to settle "the app won't do X" when the endpoint provably works under curl.
+//
+// Credentials are never logged: u/t/s/p/salt/token are dropped by name, and
+// anything unrecognised is logged by key with its value elided rather than
+// guessed at. This runs only under SUBSONIC_FACADE_DEBUG.
+func logSubsonicRequest(r *http.Request) {
+	safe := []string{}
+	interesting := map[string]bool{
+		"id": true, "albumId": true, "artistId": true, "songId": true,
+		"songIdToAdd": true, "songIndexToRemove": true, "playlistId": true,
+		"query": true, "name": true, "f": true,
+	}
+
+	src := r.URL.Query()
+	if r.Method == http.MethodPost {
+		// r.ParseForm would consume the body the proxy still has to forward, so
+		// read it and put it back. Logging must never change what upstream sees.
+		if raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil {
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			if vals, e := url.ParseQuery(string(raw)); e == nil {
+				src = vals
+			}
+		}
+	}
+	for k, vs := range src {
+		switch k {
+		case "u", "t", "s", "p", "salt", "token", "c", "v":
+			continue
+		}
+		if interesting[k] {
+			safe = append(safe, fmt.Sprintf("%s=%v", k, vs))
+		} else {
+			safe = append(safe, k+"=<set>")
+		}
+	}
+	log.Printf("subsonic facade: %s %s %v", r.Method, subsonicEndpoint(r.URL.Path), safe)
+}
+
 // subsonicEndpoint pulls "search3" out of /rest/search3 or /rest/search3.view.
 func subsonicEndpoint(path string) string {
 	name := strings.TrimPrefix(path, "/rest/")
@@ -175,6 +217,9 @@ func subsonicEndpoint(path string) string {
 }
 
 func (f *subsonicFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if f.debug {
+		logSubsonicRequest(r)
+	}
 	if !f.inject {
 		f.proxy.ServeHTTP(w, r)
 		return
