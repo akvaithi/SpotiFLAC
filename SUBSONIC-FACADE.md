@@ -131,6 +131,29 @@ the 26 endpoints are `io.Copy`.
 Five endpoints are intercepted. Everything else, including any endpoint Cassette adds
 in a future release, passes through unmodified and keeps working.
 
+### 3.1 This is not Cassette-specific
+
+Nothing in the facade knows what client is talking to it. Cassette is the *target*,
+not a dependency — the contract is the Subsonic protocol, so **any** Subsonic client
+pointed at SpotiFLAC gets the same acquisition loop: `↓` rows in search, star to
+download. Symfonium, Amperfy, substreamer, play:Sub, Feishin, the CLI clients — all of
+them, on any platform, with no per-client work. That is the main structural payoff of
+solving this at the protocol layer instead of forking an app.
+
+Three real limits, all in the *injection* path only — pass-through is universal:
+
+- **JSON only.** `f=xml` is forwarded untouched rather than rewritten. An XML client
+  gets a fully working library and no `↓` rows.
+- **GET only.** A client that submits `search3` over the `formPost` extension gets no
+  injection, for the same reason: the parameters are in the body, not the URL. Star
+  and playlist writes over POST *are* handled.
+- **Marker convention.** `↓` in the title is the only signal a client has that a row
+  is an acquisition. A client that renders titles verbatim shows it correctly; one
+  that does something clever with titles might not.
+
+Navidrome's **own web UI is unaffected** either way — it talks to Navidrome's private
+`/api` endpoints, not `/rest`, so it never passes through the facade.
+
 ---
 
 ## 4. The virtual id scheme
@@ -256,9 +279,68 @@ against `getStarred2` and **deletes every local record the server doesn't return
 The virtual favourite therefore disappears at the next sync on its own.
 
 Better still, the facade closes the loop: once the download lands and the rescan
-completes, it looks the new track up in Navidrome (by ISRC — Navidrome *does* expose
-it, verified on 0.61.2 — else title+artist) and issues a **real** `star` for it. The
-favourite the user set is then genuinely true, pointing at a real, playable track.
+completes, it looks the new track up in Navidrome and issues a **real** `star` for it.
+The favourite the user set is then genuinely true, pointing at a real, playable track.
+Matching is by `songMatches`, not the library's `nameKey` — see the comment on that
+function for why, and §5.3a for the bug that forced it.
+
+**Known consequence, accepted 2026-07-31: a freshly-acquired favourite cannot be
+removed until the app relaunches.**
+
+`FavoritesService.unstar` begins:
+
+```swift
+guard let record = try? backgroundContext.fetch(descriptor).first else { return }
+```
+
+If there is no *local* `FavoriteRecord` it returns early and **never calls the
+server** — no request, no error. The facade's re-star happens server-side under
+SpotiFLAC's own credentials, so Cassette never made that call and has no local
+record. The Favorites list still shows the track, because that list comes from
+`getStarred2`, but the unfavorite button silently does nothing.
+
+It self-heals: `syncFromServer` inserts a local record for everything `getStarred2`
+returns, after which unfavorite works normally. The catch is *when* that runs —
+`MainTabView` calls it from `.task(id: serverState.isOnline)`, so **only on launch
+and on connectivity changes**. Not pull-to-refresh, not on a timer. A user who leaves
+the app open all day keeps the stuck row all day; force-quitting and reopening clears
+it immediately.
+
+The alternative was to stop re-starring altogether, which trades a favourite that
+can't be removed for a favourite that silently disappears. Re-starring was chosen
+because it honours what the user actually asked for, and because the failure mode is
+visible and recoverable rather than silent. Nothing server-side can shorten the
+window — only the client decides when to sync.
+
+### 5.3a Why matching does not use `nameKey`
+
+The first real acquisition through the app looked like it worked — the FLAC landed,
+Navidrome indexed it, the track was playable — and the favourite was silently dropped.
+The log said `"London Thumakda" never appeared in Navidrome` for a file sitting on
+disk.
+
+**SpotiFLAC tags multiple artists separated by `•`.** Navidrome therefore reported
+`Labh Janjua • Sonu Kakkar • Neha Kakkar` while Spotify had said the same three names
+comma-separated. `firstArtist` (`library.go:108`) splits on `, ; & /` and ` x ` — not
+on bullets — so the two sides reduced to `labhjanjua` and
+`labhjanjuasonukakkarnehakakkar`, and never matched.
+
+The one-line fix — adding `•` to `firstArtist` — is **wrong** and was deliberately
+not made. That helper also feeds `normStrStrict` behind duplicate detection
+(`library_dedup.go`), where collapsing an artist list to its first name would make
+*Nightcall — Kavinsky* and *Nightcall — Kavinsky • Angèle • Phoenix* hash alike and
+offer to delete one as a duplicate. A matching bug in a favourite is an annoyance; a
+matching bug in dedup deletes music.
+
+So `songMatches` is local to the facade: exact normalized title, then substring
+containment on artists, which is separator-agnostic because `normStr` strips the
+separators themselves. Safe here because the title must already match exactly and the
+candidate set is one search's worth of rows.
+
+**Still outstanding:** `MatchLibrary` has the same blind spot, so §5.1's ownership
+filter can miss a multi-artist track you already own and offer a `↓` row for it.
+Harmless — enqueueing a duplicate is caught downstream — but it is the same root
+cause and is not fixed.
 
 ### 5.4 `createPlaylist` / `updatePlaylist` — secondary trigger, with a destination
 
