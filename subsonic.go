@@ -648,6 +648,13 @@ func (f *subsonicFacade) acquire(spotifyID string, note func(*pendingAcquisition
 		ArtistName: meta.Artists,
 		AlbumName:  meta.AlbumName,
 		CoverURL:   meta.Images,
+		// Ask for lyrics and genre in the file itself. The web UI leaves these
+		// to a checkbox, but a track acquired from a phone has no follow-up
+		// step — nobody is going to run EnrichLibrary from a bus — and
+		// tags-in-files is how everything else here works, because Navidrome
+		// then serves them to every client at once.
+		EmbedLyrics: true,
+		EmbedGenre:  true,
 	}})
 	if err != nil {
 		f.mu.Lock()
@@ -782,13 +789,41 @@ func findNavidromeSong(cfg navidromeConfig, title, artist string) string {
 		return ""
 	}
 
-	want := nameKey(title, artist)
 	for _, s := range payload.Response.SearchResult3.Song {
-		if want != "" && nameKey(s.Title, s.Artist) == want {
+		if songMatches(s.Title, s.Artist, title, artist) {
 			return s.ID
 		}
 	}
 	return ""
+}
+
+// songMatches is deliberately more forgiving than the library index's nameKey,
+// and it exists because that key got this wrong in production.
+//
+// SpotiFLAC tags multiple artists separated by "•", so Navidrome reported
+// "Labh Janjua • Sonu Kakkar • Neha Kakkar" while Spotify had said
+// "Labh Janjua, Sonu Kakkar, Neha Kakkar". `firstArtist` splits on commas and
+// slashes but not bullets, so the two sides reduced to "labhjanjua" and
+// "labhjanjuasonukakkarnehakakkar" and the track was never found — the download
+// landed, and the favourite that asked for it was silently dropped.
+//
+// The shared `nameKey` is deliberately NOT changed to fix this: it also feeds
+// the strict key behind duplicate detection, where collapsing an artist list to
+// its first name would make "Nightcall — Kavinsky" and "Nightcall — Kavinsky •
+// Angèle • Phoenix" look like the same recording and offer to delete one.
+// Substring containment is safe here because the title already had to match
+// exactly and the candidate set is one search's worth of results.
+func songMatches(navTitle, navArtist, wantTitle, wantArtist string) bool {
+	if normStr(navTitle) == "" || normStr(navTitle) != normStr(wantTitle) {
+		return false
+	}
+	if wantArtist == "" {
+		return true
+	}
+	// normStr strips the separators themselves, so a bullet-, comma- or
+	// ampersand-joined list all reduce to the same run of letters.
+	have, want := normStr(navArtist), normStr(wantArtist)
+	return have == want || strings.Contains(have, want) || strings.Contains(want, have)
 }
 
 // -----------------------------------------------------------------------------
