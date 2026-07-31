@@ -146,3 +146,19 @@ func TestPendingRowStaysVisible(t *testing.T) {
 		t.Error("XML rendering lost the pending marker")
 	}
 }
+
+// Arpeggi splits the coverArt id on ":" and requests the bare remainder, so
+// the prefix must not contain one — and a mangled id must still resolve.
+func TestCoverPrefixHasNoColon(t *testing.T) {
+	if strings.Contains(virtualCoverPrefix, ":") {
+		t.Errorf("virtualCoverPrefix %q contains a colon; clients split on it", virtualCoverPrefix)
+	}
+	v := virtualSong{SpotifyID: "abc123", Title: "T", HasCover: true}
+	got := v.jsonMap()["coverArt"].(string)
+	if strings.Contains(got, ":") {
+		t.Errorf("coverArt id %q contains a colon", got)
+	}
+	if !strings.HasSuffix(got, "abc123") {
+		t.Errorf("coverArt id %q lost the spotify id", got)
+	}
+}

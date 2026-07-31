@@ -369,6 +369,39 @@ context-menu action from a search result.
 in the same menu. Any playlist works; there is no need for a designated drop-box
 playlist, because §5.3 already covers plain acquisition.
 
+### 5.4a How long an acquisition actually takes, and why it can't be sped up
+
+Measured 2026-07-31 from the gateway's own request log, which brackets the bot
+wait exactly (`POST /fetch` → `GET /fetch/<job>/file`):
+
+| Job | Span |
+|---|---|
+| a2123f261806 | **6s** |
+| 61cf7b8e79bf | **97s** |
+| fb3303b767ba (Hair Salon) | **118s** |
+| 6e66fe2f1304 | **178s** |
+
+**All of it is inside the gateway** — the wait for `@deezload2bot` to reply.
+Everything on this side is noise by comparison: the queue picks a job up in ~0s,
+Navidrome's rescan is ~500ms (`elapsed=370.4ms, tracksImported=1`), and the
+gateway→server copy is well under a second.
+
+This supersedes the 5–13s figure in `CLAUDE.md`, which is still true of a *fast*
+reply but no longer describes the range. Two things were ruled out by measurement
+rather than argument, and should not be re-suspected:
+
+- **Lyrics are not the cost.** `FetchLyricsAllSources` makes up to five sequential
+  LRCLIB calls, which looks alarming, but LRCLIB answers in 0.3–0.6s — about 2s
+  worst case, and it runs concurrently with the download anyway.
+- **Genre lookups are not the cost.** MusicBrainz's 1.1s courtesy delay is real but
+  an order of magnitude too small to explain 178s.
+
+So there is **no meaningful speed-up available on our side.** What can be improved is
+what the user sees while waiting, which is why an in-flight row stays visible as `⏳`
+(§5.1) rather than vanishing. The remaining self-inflicted latency is the
+reconciliation poll, which sleeps 10s between attempts — worth at most 10s of a
+two-minute wait, and not worth tightening.
+
 ### 5.5 `stream` — the graceful failure
 
 `stream?id=sf:...` means the user pressed Play on a virtual row.

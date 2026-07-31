@@ -35,8 +35,20 @@ import (
 // must degrade to "the feature is missing", never to "music stopped".
 
 const (
-	virtualIDPrefix    = "sf:"
-	virtualCoverPrefix = "sf-cover:"
+	virtualIDPrefix = "sf:"
+
+	// No colon here, unlike the song id. Arpeggi splits the coverArt attribute
+	// on ":" and requests the bare remainder — verified in the request log,
+	// where every one of its getCoverArt calls carried a raw Spotify id that
+	// Navidrome has never heard of, and not one carried the prefix. Song ids
+	// survive the round trip intact in all three clients, so only this one
+	// changes; a colon is also awkward for any client that caches artwork to
+	// disk keyed by id.
+	virtualCoverPrefix = "sf-cover-"
+
+	// Still recognised on the way in, so artwork a client cached under the old
+	// scheme keeps resolving instead of turning into a broken tile.
+	legacyCoverPrefix = "sf-cover:"
 
 	// Spotify's contribution is capped: search results are a list someone is
 	// scanning, and a wall of unownable rows under the real ones is worse than
@@ -656,12 +668,29 @@ func (f *subsonicFacade) acquisitionStates() map[string]string {
 
 func (f *subsonicFacade) handleGetCoverArt(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
-	if !strings.HasPrefix(id, virtualCoverPrefix) {
+
+	spotifyID := ""
+	switch {
+	case strings.HasPrefix(id, virtualCoverPrefix):
+		spotifyID = strings.TrimPrefix(id, virtualCoverPrefix)
+	case strings.HasPrefix(id, legacyCoverPrefix):
+		spotifyID = strings.TrimPrefix(id, legacyCoverPrefix)
+	default:
+		// Belt and braces for clients that mangle the id on the way out: a bare
+		// id we have seen in a catalog search is ours, whatever the client did
+		// to the prefix. Safe because this map only ever holds Spotify track
+		// ids, so a real Navidrome cover id cannot be in it.
+		if _, known := f.recall(id); known {
+			spotifyID = id
+		}
+	}
+
+	if spotifyID == "" {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
 
-	imageURL := f.coverURL(strings.TrimPrefix(id, virtualCoverPrefix))
+	imageURL := f.coverURL(spotifyID)
 	if imageURL == "" {
 		writeSubsonicError(w, 70, "Cover art not found")
 		return
