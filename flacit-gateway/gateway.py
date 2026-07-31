@@ -59,6 +59,12 @@ FLAC_RETRY_AFTER = 35       # resend the link once if nothing has arrived by the
 JOB_REAP_AFTER = 600        # drop finished jobs (and their temp files) after this
 DOWNLOAD_CONNECTIONS = 16
 PART_SIZE = 512 * 1024
+# 16 senders hammering GetFile will eventually trip Telegram's rate limiter on a
+# long track — it asks for a wait rather than failing, and honouring it costs a
+# second. Not honouring it failed the whole job, which the queue then retried
+# from scratch three times.
+FLOOD_MAX_RETRIES = 5
+FLOOD_WAIT_CEILING = 60  # a longer demand than this is not worth blocking a job on
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 
@@ -294,7 +300,24 @@ async def _parallel_download(document, save_path, job_id, connection_count=DOWNL
                         location=location, offset=offset, limit=limit,
                         precise=True, cdn_supported=False,
                     )
-                    res = await sender.send(req)
+
+                    res = None
+                    for _ in range(FLOOD_MAX_RETRIES):
+                        try:
+                            res = await sender.send(req)
+                            break
+                        except errors.FloodWaitError as fw:
+                            if fw.seconds > FLOOD_WAIT_CEILING:
+                                raise
+                            _check_not_cancelled(job_id)
+                            # +1: Telegram's own wait is a floor, and coming back
+                            # a hair early just earns a longer one.
+                            await asyncio.sleep(fw.seconds + 1)
+                    if res is None:
+                        raise RuntimeError(
+                            "Telegram kept rate limiting this part after "
+                            f"{FLOOD_MAX_RETRIES} attempts"
+                        )
                     data = res.bytes
                     f.seek(offset)
                     f.write(data)
