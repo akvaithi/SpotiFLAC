@@ -63,6 +63,7 @@ func startDownloadWorker(app *App) {
 	}
 
 	backend.SetItemProgressListener(emitItemProgress)
+	backend.SetItemPhaseListener(emitItemPhase)
 
 	go worker.run()
 }
@@ -245,6 +246,16 @@ func emitItemProgress(id string, progressMB, speedMBps float64) {
 	})
 }
 
+// emitItemPhase relays "resolving" vs "downloading" over SSE, so a client can
+// tell "waiting on the Telegram bot" apart from "nothing is happening" during
+// the ~8-10s the gateway spends before it has any byte count to report.
+func emitItemPhase(id, phase string) {
+	emitEvent("download:phase", map[string]interface{}{
+		"id":    id,
+		"phase": phase,
+	})
+}
+
 // ---------------------------------------------------------------- RPC surface
 
 type QueueItem struct {
@@ -262,6 +273,7 @@ type QueueItem struct {
 	ProgressMB float64 `json:"progress_mb"`
 	TotalMB    float64 `json:"total_mb"`
 	SpeedMBps  float64 `json:"speed_mbps"`
+	Phase      string  `json:"phase,omitempty"`
 	EnqueuedAt int64   `json:"enqueued_at"`
 	StartedAt  int64   `json:"started_at,omitempty"`
 	FinishedAt int64   `json:"finished_at,omitempty"`
@@ -356,6 +368,7 @@ func (a *App) GetQueue() (QueueInfo, error) {
 			view.ProgressMB = item.Progress
 			view.TotalMB = item.TotalSize
 			view.SpeedMBps = item.Speed
+			view.Phase = item.Phase
 		}
 		switch rec.Status {
 		case backend.QueueQueued:

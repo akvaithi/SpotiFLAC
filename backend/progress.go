@@ -31,6 +31,10 @@ type DownloadItem struct {
 	EndTime      int64          `json:"end_time"`
 	ErrorMessage string         `json:"error_message"`
 	FilePath     string         `json:"file_path"`
+	// Phase distinguishes "resolving" (waiting on the Telegram bot's reply, no
+	// byte-level signal exists yet) from "downloading" (bytes are moving and
+	// Progress/TotalSize are meaningful). Empty until the first phase update.
+	Phase string `json:"phase,omitempty"`
 }
 
 var (
@@ -376,6 +380,48 @@ func GetCurrentItemID() string {
 	currentItemLock.RLock()
 	defer currentItemLock.RUnlock()
 	return currentItemID
+}
+
+// itemPhaseListener mirrors itemProgressListener but for phase transitions,
+// which have no byte count to report (there's nothing to poll a percentage
+// out of while waiting on the bot's reply).
+var (
+	itemPhaseListener   func(id, phase string)
+	itemPhaseListenerMu sync.RWMutex
+)
+
+func SetItemPhaseListener(fn func(id, phase string)) {
+	itemPhaseListenerMu.Lock()
+	itemPhaseListener = fn
+	itemPhaseListenerMu.Unlock()
+}
+
+// SetItemPhase records which stage of the fetch an item is in and notifies
+// listeners, but only on an actual change — awaitReady polls every 500ms and
+// would otherwise re-announce the same phase for the entire wait.
+func SetItemPhase(id, phase string) {
+	changed := false
+	downloadQueueLock.Lock()
+	for i := range downloadQueue {
+		if downloadQueue[i].ID == id {
+			if downloadQueue[i].Phase != phase {
+				downloadQueue[i].Phase = phase
+				changed = true
+			}
+			break
+		}
+	}
+	downloadQueueLock.Unlock()
+
+	if !changed {
+		return
+	}
+	itemPhaseListenerMu.RLock()
+	listener := itemPhaseListener
+	itemPhaseListenerMu.RUnlock()
+	if listener != nil {
+		listener(id, phase)
+	}
 }
 
 // SetItemTotalSize records an item's expected size in MB before it finishes, so

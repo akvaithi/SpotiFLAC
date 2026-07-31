@@ -109,6 +109,55 @@ func (f *FlacItDownloader) Download(
 		return "EXISTS:" + expectedPath, nil
 	}
 
+	// Both of these are pure metadata lookups that don't need the FLAC file to
+	// exist yet, and the gateway wait below is dominated by tens of seconds of
+	// bot round-trip (see awaitReady) during which the Go process is otherwise
+	// idle. Kicking them off now instead of after downloadFile hides their
+	// latency entirely behind that wait rather than adding to the end of it —
+	// the same trick already used for the MusicBrainz fetch above.
+	identChan := make(chan struct {
+		identifiers SpotifyTrackIdentifiers
+		err         error
+	}, 1)
+	go func() {
+		identifiers, err := GetSpotifyTrackIdentifiersDirect(spotifyURL)
+		identChan <- struct {
+			identifiers SpotifyTrackIdentifiers
+			err         error
+		}{identifiers, err}
+	}()
+
+	coverChan := make(chan string, 1)
+	if coverURL != "" {
+		go func() {
+			path := expectedPath + ".cover.jpg"
+			coverClient := NewCoverClient()
+			if err := coverClient.DownloadCoverToPath(coverURL, path, embedMaxQualityCover); err != nil {
+				fmt.Printf("Warning: failed to download Spotify cover: %v\n", err)
+				coverChan <- ""
+				return
+			}
+			coverChan <- path
+		}()
+	} else {
+		coverChan <- ""
+	}
+
+	// The cover is a temp file that must be removed on *every* path, including
+	// the gateway failures below that return before it's ever read. Waiting on
+	// the channel first is what makes that safe: the goroutine may still be
+	// mid-write, and removing the path before it finishes would leave the file.
+	coverPath := ""
+	coverReceived := false
+	defer func() {
+		if !coverReceived {
+			coverPath = <-coverChan
+		}
+		if coverPath != "" {
+			os.Remove(coverPath)
+		}
+	}()
+
 	trackURL := f.resolveTrackURL(spotifyID)
 	f.SourceURL = trackURL
 	f.SourceLabel = fmt.Sprintf("%s - %s", artistName, trackName)
@@ -137,24 +186,16 @@ func (f *FlacItDownloader) Download(
 	}
 
 	upc := ""
-	if identifiers, err := GetSpotifyTrackIdentifiersDirect(spotifyURL); err == nil || identifiers.ISRC != "" || identifiers.UPC != "" {
-		if isrc == "" && strings.TrimSpace(identifiers.ISRC) != "" {
-			isrc = strings.TrimSpace(identifiers.ISRC)
+	identResult := <-identChan
+	if identResult.err == nil || identResult.identifiers.ISRC != "" || identResult.identifiers.UPC != "" {
+		if isrc == "" && strings.TrimSpace(identResult.identifiers.ISRC) != "" {
+			isrc = strings.TrimSpace(identResult.identifiers.ISRC)
 		}
-		upc = strings.TrimSpace(identifiers.UPC)
+		upc = strings.TrimSpace(identResult.identifiers.UPC)
 	}
 
-	coverPath := ""
-	if coverURL != "" {
-		coverPath = expectedPath + ".cover.jpg"
-		coverClient := NewCoverClient()
-		if err := coverClient.DownloadCoverToPath(coverURL, coverPath, embedMaxQualityCover); err != nil {
-			fmt.Printf("Warning: failed to download Spotify cover: %v\n", err)
-			coverPath = ""
-		} else {
-			defer os.Remove(coverPath)
-		}
-	}
+	coverPath = <-coverChan
+	coverReceived = true
 
 	trackNumberToEmbed := spotifyTrackNumber
 	if trackNumberToEmbed == 0 {
@@ -284,8 +325,18 @@ func (f *FlacItDownloader) awaitReady(jobID string) error {
 				return fmt.Errorf("%s", view.Error)
 			}
 			return fmt.Errorf("gateway job failed")
+		case "resolving":
+			// The bulk of a fetch's wall time lives here — the bot searching
+			// Deezer and replying over Telegram, tens of seconds by design
+			// (see flacit-gateway/gateway.py) — and there's no byte count to
+			// report yet. Surfacing the phase at least tells a client this
+			// isn't stuck, since progress/total stay 0/0 the whole time.
+			if itemID != "" {
+				SetItemPhase(itemID, "resolving")
+			}
 		case "downloading":
 			if itemID != "" {
+				SetItemPhase(itemID, "downloading")
 				if view.Size > 0 {
 					SetItemTotalSize(itemID, float64(view.Size)/(1024*1024))
 				}
