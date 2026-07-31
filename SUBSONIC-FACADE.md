@@ -1,7 +1,9 @@
 # DESIGN — the Subsonic facade
 
-**Status:** built in `subsonic.go`, verified against a mock Navidrome, **not yet
-deployed and not yet tested against the shipped Cassette builds**.
+**Status:** built in `subsonic.go` and **deployed with `SUBSONIC_FACADE: inject`**.
+Phase 1 (pure proxy) passed on the shipped macOS Cassette. Phases 2–6 are verified
+server-side against real Navidrome but **not yet exercised through the app**, and
+phase 7 (iOS) is untouched.
 **Date:** 2026-07-31
 **Target client:** [Cassette](https://github.com/CassetteLab/cassette) (iOS + macOS),
 **unmodified official builds**.
@@ -441,6 +443,17 @@ all and immediately tells us how good Cassette can get.
 
 **The decision is ListenBrainz only** (11.1 + 11.2). AudioMuse is declined; 11.3
 records why.
+
+**Done 2026-07-31:** token stored in the Keychain (`listenbrainz`), and the Spotify
+history imported — **82,937 listens, 2020-05-08 to 2026-07-27**, submitted through
+`/1/submit-listens` as `listen_type: "import"`. The account was empty beforehand, so
+there was no duplication risk. Filters applied: needs a track name (drops 61
+podcast/local rows) and ≥30s played (drops 34,602 skips), deduped on
+(timestamp, track, artist). Two things worth knowing if this is ever repeated:
+ListenBrainz's rate limit is **30 requests per 5s** and it is shared with *reads*, so
+polling the listen-count endpoint during an import is what exhausted the importer's
+retries at offset 77,000 the first time; and `listen-count` lags the ingestion queue
+by minutes, so a short count right after a submission is not a failure.
 
 ### 11.1 ListenBrainz — scrobbling and recommendations
 
