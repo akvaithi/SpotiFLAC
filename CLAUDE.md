@@ -93,8 +93,24 @@ IP gotcha below) — recreating containers silently invalidates it.
   finish flips `is_downloading` false for all of them. `CancelQueueItem` on the
   active item calls `ForceStopActiveDownloads`, which cancels *every* in-flight
   download because the cancellation scope is shared.
+- **Most of a download is the bot, not the transfer** (measured 2026-07-31):
+  the gateway→server copy of an 11MB FLAC is ~0.05s, while `@deezload2bot`
+  takes 5–13s to reply. Neither the box (39MB RSS, 0% CPU, no memory pressure)
+  nor Navidrome (~500ms scan, plus its own filesystem watcher) is a factor.
+  Two consequences are already handled and shouldn't be re-litigated:
+  `EnqueueDownloads` **prewarms the Deezer link** through
+  `backend.ResolveDeezerURL` (singleflight + cache, capped at 3 concurrent
+  because `songlink.go` has no backoff, and failures are deliberately *not*
+  cached so a queue retry re-resolves); and the gateway waits on a Telethon
+  `NewMessage` event rather than a 2s poll, with the poll kept as a backstop.
+  `_parallel_download` honours `FloodWaitError` — 16 senders trip Telegram's
+  limiter on long tracks, and not waiting failed the whole job.
 - **Per-item progress over SSE**: `ProgressInfo` is global and can't describe a
-  queue. `backend.SetItemProgressListener` now feeds `download:progress`
+  queue. There is **no byte count during the bot wait** — the gateway doesn't
+  know the size until the document arrives — so that phase is reported as
+  `download:phase` (`{id, phase}`, `resolving`|`downloading`) instead of a fake
+  percentage; a client should label it rather than show an empty bar.
+  `backend.SetItemProgressListener` now feeds `download:progress`
   (`{id, progress_mb, total_mb, speed_mbps}`, throttled to 4/s) and the worker
   emits `download:item` on every status change. `backend/flacit.go` reports
   progress two ways depending on phase: `awaitReady` polls the gateway's job

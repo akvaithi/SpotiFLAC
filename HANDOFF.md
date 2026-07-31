@@ -2,6 +2,49 @@
 
 Snapshot of where things stand. Read `CLAUDE.md` for architecture/build details.
 
+## 2026-07-31 — Download latency measured, and three fixes
+
+Timed the full Harmony path (search → download → playable) against the live
+box. **~17s end to end for a typical track**, and the breakdown was not where
+it looked:
+
+| phase | time |
+|---|---|
+| song.link Deezer resolution | 0.7–3.5s |
+| Telegram bot round-trip | 5–13s |
+| gateway → server copy (16 conns, same host) | ~0.05s |
+| metadata + tagging | ~1–2s |
+| Navidrome scan | ~0.5s |
+
+Two things this ruled out. **The box is not the bottleneck** — spotiflac uses
+39MB and 0% CPU, and memory PSI is 0.00 across all windows (the 3.3GB of swap
+in use is stale, not thrashing). **Navidrome is not either** — a scan over
+1,319 files takes ~500ms, and it already runs a filesystem watcher that picks
+up new files ~5s later on its own, so the worker's `startScan` is an
+accelerant rather than the mechanism. Tracks in a batch appear incrementally,
+which an earlier note in this file got wrong.
+
+Fixed:
+- **The progress bar had nothing to report.** `awaitReady` only relayed
+  progress for the gateway's `downloading` state, which lasts a fraction of a
+  second — so `progress_mb`/`total_mb` stayed 0/0 for the whole bot wait and
+  clients fell back to an unexplained spinner. There is no byte count to
+  invent during that wait, so the *phase* is reported instead, over a new
+  `download:phase` SSE event. Harmony labels it "Waiting on Telegram bot…".
+- **song.link ran on the critical path.** `EnqueueDownloads` now prewarms the
+  Deezer link (capped at 3 concurrent; `backend/songlink.go` does no backoff).
+  Measured after: `enqueued_at` 09:08:09 → gateway `POST /fetch` 09:08:10.
+- **The gateway polled for the bot's reply every 2s**, costing ~1s per fetch on
+  average. It now waits on a Telethon `NewMessage` event, with the 2s poll kept
+  as a backstop.
+- **`_parallel_download` ignored `FloodWaitError`.** 16 senders trip Telegram's
+  rate limiter on long tracks; the exception failed the job and the queue
+  retried it from scratch 3×. A 6:36 / 46MB track burned 120s and produced no
+  file. It now honours the wait, and that same track completes in 15s.
+
+Caveat worth keeping: the verifying run logged **zero** flood waits, so the
+retry path is correct by inspection but has not been exercised under load.
+
 ## 2026-07-30 — Download engine replaced: Telegram/Deezer via flacit-gateway
 
 Ripped out the Tidal/Qobuz/Amazon downloaders, the community Cloudflare
