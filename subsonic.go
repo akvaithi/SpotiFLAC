@@ -40,9 +40,29 @@ const (
 	// a short one.
 	maxInjectedSongs = 10
 
-	// A search box that stalls is a worse regression than a missing
-	// acquisition row, so the catalog lookup runs against a hard budget.
-	spotifySearchBudget = 1500 * time.Millisecond
+	// How long a search3 will wait for Spotify, and it is two numbers because
+	// the right answer depends on what the library already said.
+	//
+	// Measured 2026-07-31: a Spotify catalog search costs 1.4–1.7s warm, and
+	// the limit doesn't move it — it's the round trip to the partner API, not
+	// the payload. A single budget therefore can't win. At 1.5s it lands on the
+	// median and injection becomes a coin flip; at 2.5s every search in the app
+	// slows to Spotify's speed, including searches for music already owned,
+	// which is a real regression on the common case.
+	//
+	// So: if Navidrome already answered well, take whatever is cached and get
+	// out of the way. If it came up short, that is exactly when acquisition is
+	// the point, and waiting is what the user wants.
+	spotifyFastBudget = 250 * time.Millisecond
+	spotifySlowBudget = 2500 * time.Millisecond
+
+	// Below this many real hits, the library is treated as having come up short.
+	librarySatisfied = 5
+
+	// Repeat searches are common (refining a query, coming back to a screen),
+	// and the catalog does not change minute to minute.
+	searchCacheTTL     = 10 * time.Minute
+	searchCacheEntries = 300
 )
 
 type subsonicFacade struct {
@@ -59,6 +79,14 @@ type subsonicFacade struct {
 	seenOrder []string
 	// spotifyID -> what to do once the track is really in the library.
 	pending map[string]*pendingAcquisition
+	// query -> catalog results, so a repeat search never waits.
+	searchCache map[string]cachedSearch
+	searchOrder []string
+}
+
+type cachedSearch struct {
+	tracks []backend.SearchResult
+	at     time.Time
 }
 
 // pendingAcquisition is the promise made when a virtual id was starred or
@@ -100,8 +128,9 @@ func initSubsonicFacade(app *App) *subsonicFacade {
 		// a large FLAC are ordinary. The proxy handles those itself.
 		client:  &http.Client{Timeout: 20 * time.Second},
 		inject:  envOr("SUBSONIC_FACADE", "") == "inject",
-		seen:    map[string]backend.SearchResult{},
-		pending: map[string]*pendingAcquisition{},
+		seen:        map[string]backend.SearchResult{},
+		pending:     map[string]*pendingAcquisition{},
+		searchCache: map[string]cachedSearch{},
 	}
 
 	// A failure reaching Navidrome is Navidrome's answer to give, not ours to
@@ -114,9 +143,26 @@ func initSubsonicFacade(app *App) *subsonicFacade {
 	mode := "pass-through only"
 	if f.inject {
 		mode = "injection enabled"
+		go f.keepSpotifyWarm()
 	}
 	log.Printf("subsonic facade: /rest/* -> %s (%s)", cfg.URL, mode)
 	return f
+}
+
+// keepSpotifyWarm holds a live Spotify access token so no search pays for the
+// TOTP handshake on top of the search itself.
+//
+// This removes one variable rather than being the fix: measurement showed the
+// dominant cost is the catalog round trip (1.4–1.7s warm), not the handshake.
+// The token lives in a package-level cache in backend/spotfetch.go, so warming
+// it here warms it for every caller. The interval is well inside the ~1h expiry.
+func (f *subsonicFacade) keepSpotifyWarm() {
+	for {
+		if err := backend.NewSpotifyClient().Initialize(); err != nil {
+			log.Printf("subsonic facade: Spotify token warm-up failed: %v", err)
+		}
+		time.Sleep(20 * time.Minute)
+	}
 }
 
 // subsonicEndpoint pulls "search3" out of /rest/search3 or /rest/search3.view.
@@ -170,21 +216,25 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The catalog lookup runs alongside the upstream request, not after it.
-	type spotifyResult struct {
-		tracks []backend.SearchResult
+	// The catalog lookup runs alongside the upstream request, not after it. A
+	// cache hit skips it entirely; a miss keeps filling the cache in the
+	// background even if this request gives up waiting, so the next search for
+	// the same words is instant.
+	cached, hit := f.cachedSearch(query)
+	spotifyCh := make(chan []backend.SearchResult, 1)
+	if !hit {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), spotifySlowBudget)
+			defer cancel()
+			resp, err := backend.SearchSpotify(ctx, query, maxInjectedSongs*3)
+			if err != nil || resp == nil {
+				spotifyCh <- nil
+				return
+			}
+			f.cacheSearch(query, resp.Tracks)
+			spotifyCh <- resp.Tracks
+		}()
 	}
-	spotifyCh := make(chan spotifyResult, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), spotifySearchBudget)
-		defer cancel()
-		resp, err := backend.SearchSpotify(ctx, query, maxInjectedSongs*3)
-		if err != nil || resp == nil {
-			spotifyCh <- spotifyResult{}
-			return
-		}
-		spotifyCh <- spotifyResult{tracks: resp.Tracks}
-	}()
 
 	body, ct, err := f.forward(r)
 	if err != nil {
@@ -202,16 +252,6 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var spotify spotifyResult
-	select {
-	case spotify = <-spotifyCh:
-	case <-time.After(spotifySearchBudget):
-	}
-	if len(spotify.tracks) == 0 {
-		writeRaw(w, ct, body)
-		return
-	}
-
 	resp, _ := envelope["subsonic-response"].(map[string]any)
 	if resp == nil || resp["status"] != "ok" {
 		writeRaw(w, ct, body)
@@ -224,7 +264,25 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	}
 	songs, _ := result["song"].([]any)
 
-	virtual := f.virtualSongs(spotify.tracks, songs)
+	// How long to wait is decided *after* seeing what the library returned —
+	// see the budget constants. A well-answered search never pays for Spotify.
+	tracks := cached
+	if !hit {
+		budget := spotifySlowBudget
+		if len(songs) >= librarySatisfied {
+			budget = spotifyFastBudget
+		}
+		select {
+		case tracks = <-spotifyCh:
+		case <-time.After(budget):
+		}
+	}
+	if len(tracks) == 0 {
+		writeRaw(w, ct, body)
+		return
+	}
+
+	virtual := f.virtualSongs(tracks, songs)
 	if len(virtual) == 0 {
 		writeRaw(w, ct, body)
 		return
@@ -367,6 +425,31 @@ func (f *subsonicFacade) handleGetCoverArt(w http.ResponseWriter, r *http.Reques
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, 8<<20))
 }
 
+func (f *subsonicFacade) cachedSearch(query string) ([]backend.SearchResult, bool) {
+	key := strings.ToLower(strings.TrimSpace(query))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entry, ok := f.searchCache[key]
+	if !ok || time.Since(entry.at) > searchCacheTTL {
+		return nil, false
+	}
+	return entry.tracks, true
+}
+
+func (f *subsonicFacade) cacheSearch(query string, tracks []backend.SearchResult) {
+	key := strings.ToLower(strings.TrimSpace(query))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.searchCache[key]; !exists {
+		f.searchOrder = append(f.searchOrder, key)
+	}
+	f.searchCache[key] = cachedSearch{tracks: tracks, at: time.Now()}
+	for len(f.searchOrder) > searchCacheEntries {
+		delete(f.searchCache, f.searchOrder[0])
+		f.searchOrder = f.searchOrder[1:]
+	}
+}
+
 func (f *subsonicFacade) remember(t backend.SearchResult) {
 	if t.ID == "" {
 		return
@@ -444,26 +527,55 @@ func (f *subsonicFacade) handlePlaylist(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// A playlist that doesn't exist yet has no id to remember, so a virtual
-	// track added during creation is acquired but not filed. Adding it to the
-	// new playlist afterwards would mean reading back the id Navidrome
-	// minted — worth doing later; for now the track still reaches the library.
-	playlistID := q.Get("playlistId")
-
 	for _, spotifyID := range virtual {
-		err := f.acquire(spotifyID, func(p *pendingAcquisition) {
-			if playlistID != "" && !contains(p.Playlists, playlistID) {
-				p.Playlists = append(p.Playlists, playlistID)
-			}
-		})
-		if err != nil {
+		if err := f.acquire(spotifyID, nil); err != nil {
 			log.Printf("subsonic facade: could not enqueue %s: %v", spotifyID, err)
 			writeSubsonicError(w, 0, "could not queue download")
 			return
 		}
 	}
 
-	f.forwardRemaining(w, r, param, real)
+	// Forward first, then record the destination, because on createPlaylist the
+	// id only exists once Navidrome has answered — a playlist being created has
+	// no id to file anything under yet. Without reading it back, a ↓ track added
+	// while making a new playlist would be acquired and then never filed.
+	body, ct, err := f.forwardWithout(r, param, real)
+	if err != nil {
+		// The acquisition still happened; only the filing is lost.
+		writeSubsonicOK(w)
+		return
+	}
+
+	playlistID := q.Get("playlistId")
+	if playlistID == "" {
+		playlistID = createdPlaylistID(body)
+	}
+	if playlistID != "" {
+		f.mu.Lock()
+		for _, spotifyID := range virtual {
+			if p := f.pending[spotifyID]; p != nil && !contains(p.Playlists, playlistID) {
+				p.Playlists = append(p.Playlists, playlistID)
+			}
+		}
+		f.mu.Unlock()
+	}
+
+	writeRaw(w, ct, body)
+}
+
+// createPlaylistID digs the new playlist's id out of Navidrome's response.
+func createdPlaylistID(body []byte) string {
+	var payload struct {
+		Response struct {
+			Playlist struct {
+				ID string `json:"id"`
+			} `json:"playlist"`
+		} `json:"subsonic-response"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	return payload.Response.Playlist.ID
 }
 
 // -----------------------------------------------------------------------------
@@ -502,9 +614,11 @@ func (f *subsonicFacade) acquire(spotifyID string, note func(*pendingAcquisition
 	f.mu.Unlock()
 
 	if existing != nil {
-		f.mu.Lock()
-		note(existing)
-		f.mu.Unlock()
+		if note != nil {
+			f.mu.Lock()
+			note(existing)
+			f.mu.Unlock()
+		}
 		return nil
 	}
 
@@ -514,7 +628,9 @@ func (f *subsonicFacade) acquire(spotifyID string, note func(*pendingAcquisition
 	}
 
 	p := &pendingAcquisition{SpotifyID: spotifyID, Title: meta.Name, Artist: firstArtist(meta.Artists)}
-	note(p)
+	if note != nil {
+		note(p)
+	}
 
 	f.mu.Lock()
 	f.pending[spotifyID] = p
@@ -697,7 +813,17 @@ func (f *subsonicFacade) forwardRemaining(w http.ResponseWriter, r *http.Request
 		writeSubsonicOK(w)
 		return
 	}
+	body, ct, err := f.forwardWithout(r, param, real)
+	if err != nil {
+		writeSubsonicOK(w)
+		return
+	}
+	writeRaw(w, ct, body)
+}
 
+// forwardWithout replays the client's request with `param` reduced to the real
+// ids, so Navidrome never sees a virtual one.
+func (f *subsonicFacade) forwardWithout(r *http.Request, param string, real []string) ([]byte, string, error) {
 	q := r.URL.Query()
 	q.Del(param)
 	for _, id := range real {
@@ -708,12 +834,7 @@ func (f *subsonicFacade) forwardRemaining(w http.ResponseWriter, r *http.Request
 
 	proxied := r.Clone(r.Context())
 	proxied.URL = &forwarded
-	body, ct, err := f.forward(proxied)
-	if err != nil {
-		writeSubsonicOK(w)
-		return
-	}
-	writeRaw(w, ct, body)
+	return f.forward(proxied)
 }
 
 // forward performs the client's own request against Navidrome, credentials and

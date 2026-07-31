@@ -187,10 +187,29 @@ Two filters before appending:
 - **Cap at 10.** Search results are a list someone is scanning; a wall of
   unownable rows below the real ones is worse than a short one.
 
-Spotify search adds latency to every search Cassette makes. The Spotify call runs
-**concurrently** with the Navidrome forward and is dropped if it hasn't returned
-within **1.5s** — a search box that stalls is a worse regression than a missing
-acquisition row.
+**Latency, measured 2026-07-31 — this is the part that needed rethinking.**
+
+A Spotify catalog search costs **1.4–1.7s warm**, and the requested limit doesn't
+move it (10 vs 30 results: no difference). It is the round trip to the partner API.
+Warming the access token helps marginally and is done anyway (`keepSpotifyWarm`), but
+it is not the cost.
+
+That kills the original single-budget plan. At 1.5s the budget sits on the median and
+injection becomes a coin flip — observed directly: the same query returned 0 rows then
+10. At 2.5s every search in the app slows to Spotify's speed, *including* searches for
+music already owned, which is a real regression on the common case.
+
+So the wait is decided **after** seeing what Navidrome returned:
+
+| Navidrome returned | Budget | Rationale |
+|---|---|---|
+| ≥ 5 songs | **250ms** | The library answered. Take whatever is cached and get out of the way. |
+| < 5 songs | **2.5s** | The library came up short, which is exactly when acquisition is the point. |
+
+A **10-minute, 300-entry query cache** sits in front of both, and the background fetch
+keeps filling it even when the request gave up waiting — so a refined or repeated
+search is instant. Measured: 2.04s first, **0.01s** repeat; a well-answered search
+stays at 0.25s and injects nothing.
 
 ### 5.2 `getCoverArt` — virtual artwork
 
