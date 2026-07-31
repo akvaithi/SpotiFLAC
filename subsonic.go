@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -249,17 +251,23 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := strings.TrimSpace(q.Get("query"))
 
-	// Three reasons to stay out of the way entirely:
-	//   - XML clients: rewriting XML is a different job and Cassette asks for JSON.
+	// Two reasons to stay out of the way entirely:
 	//   - POST (the formPost extension): the body carries the params, not the URL.
 	//   - An empty query is not a search. Cassette's allSongs() enumerates the
 	//     whole library through search3 with an empty query and songOffset
 	//     paging; injecting there would scatter placeholders through the
 	//     library listing and into everything that caches it.
-	if q.Get("f") != "json" || r.Method != http.MethodGet || query == "" || q.Get("songOffset") != "" {
+	//
+	// Format is *not* a reason any more. Both JSON and XML are injected, because
+	// Amperfy and Arpeggi showed library-only results in the field: they call
+	// search3 like everyone else but parse XML, and skipping non-JSON meant
+	// acquisition worked in exactly one client.
+	if r.Method != http.MethodGet || query == "" || q.Get("songOffset") != "" {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
+	// Subsonic's default response format is XML when `f` is absent.
+	wantJSON := q.Get("f") == "json"
 
 	// The catalog lookup runs alongside the upstream request, not after it. A
 	// cache hit skips it entirely; a miss keeps filling the cache in the
@@ -287,34 +295,54 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// UseNumber keeps every upstream number byte-identical on the way back out.
-	// Without it a re-marshalled float64 can change how an id or a size reads.
-	var envelope map[string]any
-	dec := json.NewDecoder(strings.NewReader(string(body)))
-	dec.UseNumber()
-	if err := dec.Decode(&envelope); err != nil {
-		writeRaw(w, ct, body)
-		return
-	}
+	// Both formats need the same two facts before deciding anything: how many
+	// songs the library returned, and what they were (so a catalog hit for one
+	// of them isn't offered twice).
+	var (
+		envelope  map[string]any
+		result    map[string]any
+		songs     []any
+		songCount int
+		ownedKeys map[string]bool
+	)
 
-	resp, _ := envelope["subsonic-response"].(map[string]any)
-	if resp == nil || resp["status"] != "ok" {
-		writeRaw(w, ct, body)
-		return
+	if wantJSON {
+		// UseNumber keeps every upstream number byte-identical on the way back
+		// out. Without it a re-marshalled float64 can change how an id reads.
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.UseNumber()
+		if err := dec.Decode(&envelope); err != nil {
+			writeRaw(w, ct, body)
+			return
+		}
+		resp, _ := envelope["subsonic-response"].(map[string]any)
+		if resp == nil || resp["status"] != "ok" {
+			writeRaw(w, ct, body)
+			return
+		}
+		result, _ = resp["searchResult3"].(map[string]any)
+		if result == nil {
+			result = map[string]any{}
+			resp["searchResult3"] = result
+		}
+		songs, _ = result["song"].([]any)
+		songCount = len(songs)
+		ownedKeys = ownedKeySetJSON(songs)
+	} else {
+		var ok bool
+		ownedKeys, songCount, ok = ownedKeySetXML(body)
+		if !ok {
+			writeRaw(w, ct, body)
+			return
+		}
 	}
-	result, _ := resp["searchResult3"].(map[string]any)
-	if result == nil {
-		result = map[string]any{}
-		resp["searchResult3"] = result
-	}
-	songs, _ := result["song"].([]any)
 
 	// How long to wait is decided *after* seeing what the library returned —
 	// see the budget constants. A well-answered search never pays for Spotify.
 	tracks := cached
 	if !hit {
 		budget := spotifySlowBudget
-		if len(songs) >= librarySatisfied {
+		if songCount >= librarySatisfied {
 			budget = spotifyFastBudget
 		}
 		select {
@@ -327,12 +355,26 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	virtual := f.virtualSongs(tracks, songs)
+	virtual := f.virtualSongs(tracks, ownedKeys)
 	if len(virtual) == 0 {
 		writeRaw(w, ct, body)
 		return
 	}
-	result["song"] = append(songs, virtual...)
+
+	if !wantJSON {
+		out, ok := injectXMLSongs(body, virtual)
+		if !ok {
+			writeRaw(w, ct, body)
+			return
+		}
+		writeRaw(w, ct, out)
+		return
+	}
+
+	for _, v := range virtual {
+		songs = append(songs, v.jsonMap())
+	}
+	result["song"] = songs
 
 	out, err := json.Marshal(envelope)
 	if err != nil {
@@ -342,10 +384,70 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	writeRaw(w, ct, out)
 }
 
-// virtualSongs turns Spotify hits into Subsonic songs, dropping anything
+// virtualSong is the one description of an acquirable row. It exists so the
+// JSON and XML renderings cannot drift apart — the earlier version built a
+// map inline, which would have meant maintaining the field list twice.
+type virtualSong struct {
+	SpotifyID string
+	Title     string
+	Artist    string
+	Album     string
+	HasCover  bool
+	Duration  int // seconds
+}
+
+func (v virtualSong) jsonMap() map[string]any {
+	m := map[string]any{
+		"id":     virtualIDPrefix + v.SpotifyID,
+		"title":  "↓ " + v.Title,
+		"artist": v.Artist,
+		"album":  v.Album,
+		"isDir":  false,
+		"type":   "music",
+		"suffix": "flac",
+		// Deliberately absent: created / starred / played. They are Date?
+		// on the client and a malformed date would fail the decode for the
+		// whole response, taking the real results down with it.
+	}
+	if v.HasCover {
+		m["coverArt"] = virtualCoverPrefix + v.SpotifyID
+	}
+	if v.Duration > 0 {
+		m["duration"] = v.Duration
+	}
+	return m
+}
+
+func (v virtualSong) xmlElement() string {
+	var b strings.Builder
+	b.WriteString("<song")
+	attr := func(name, value string) {
+		b.WriteString(" ")
+		b.WriteString(name)
+		b.WriteString(`="`)
+		_ = xml.EscapeText(&b, []byte(value))
+		b.WriteString(`"`)
+	}
+	attr("id", virtualIDPrefix+v.SpotifyID)
+	attr("title", "↓ "+v.Title)
+	attr("artist", v.Artist)
+	attr("album", v.Album)
+	attr("isDir", "false")
+	attr("type", "music")
+	attr("suffix", "flac")
+	if v.HasCover {
+		attr("coverArt", virtualCoverPrefix+v.SpotifyID)
+	}
+	if v.Duration > 0 {
+		attr("duration", strconv.Itoa(v.Duration))
+	}
+	b.WriteString("/>")
+	return b.String()
+}
+
+// virtualSongs turns Spotify hits into acquirable rows, dropping anything
 // already owned or already on its way.
-func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned []any) []any {
-	ownedKeys := ownedKeySet(owned)
+func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys map[string]bool) []virtualSong {
 	queued := f.queuedSpotifyIDs()
 
 	// Two ownership signals, unioned. Navidrome's own results are the
@@ -363,7 +465,7 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned []any
 		indexed[m.Index] = m.InLibrary
 	}
 
-	out := make([]any, 0, maxInjectedSongs)
+	out := make([]virtualSong, 0, maxInjectedSongs)
 	for i, t := range tracks {
 		if len(out) >= maxInjectedSongs {
 			break
@@ -376,33 +478,21 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned []any
 		}
 
 		f.remember(t)
-
-		song := map[string]any{
-			"id":     virtualIDPrefix + t.ID,
-			"title":  "↓ " + t.Name,
-			"artist": t.Artists,
-			"album":  t.AlbumName,
-			"isDir":  false,
-			"type":   "music",
-			"suffix": "flac",
-			// Deliberately absent: created / starred / played. They are Date?
-			// on the client and a malformed date would fail the decode for the
-			// whole response, taking the real results down with it.
-		}
-		if t.Images != "" {
-			song["coverArt"] = virtualCoverPrefix + t.ID
-		}
-		if t.Duration > 0 {
-			song["duration"] = t.Duration / 1000
-		}
-		out = append(out, song)
+		out = append(out, virtualSong{
+			SpotifyID: t.ID,
+			Title:     t.Name,
+			Artist:    t.Artists,
+			Album:     t.AlbumName,
+			HasCover:  t.Images != "",
+			Duration:  t.Duration / 1000,
+		})
 	}
 	return out
 }
 
-// ownedKeySet indexes the songs Navidrome just returned, so a catalog hit for
-// something already in that same result list never appears twice.
-func ownedKeySet(songs []any) map[string]bool {
+// ownedKeySetJSON indexes the songs Navidrome just returned, so a catalog hit
+// for something already in that same result list never appears twice.
+func ownedKeySetJSON(songs []any) map[string]bool {
 	keys := map[string]bool{}
 	for _, raw := range songs {
 		s, _ := raw.(map[string]any)
@@ -416,6 +506,89 @@ func ownedKeySet(songs []any) map[string]bool {
 		}
 	}
 	return keys
+}
+
+// ownedKeySetXML does the same by scanning tokens, and doubles as the
+// validity check for the XML path: it reports ok only for a well-formed
+// status="ok" response, so anything surprising falls through to pass-through.
+func ownedKeySetXML(body []byte) (keys map[string]bool, songCount int, ok bool) {
+	keys = map[string]bool{}
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	sawResponse, statusOK := false, false
+
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		se, isStart := tok.(xml.StartElement)
+		if !isStart {
+			continue
+		}
+		switch se.Name.Local {
+		case "subsonic-response":
+			sawResponse = true
+			for _, a := range se.Attr {
+				if a.Name.Local == "status" && a.Value == "ok" {
+					statusOK = true
+				}
+			}
+		case "song":
+			songCount++
+			var title, artist string
+			for _, a := range se.Attr {
+				switch a.Name.Local {
+				case "title":
+					title = a.Value
+				case "artist":
+					artist = a.Value
+				}
+			}
+			if title != "" {
+				keys[nameKey(title, artist)] = true
+			}
+		}
+	}
+	return keys, songCount, sawResponse && statusOK
+}
+
+// injectXMLSongs splices rows into <searchResult3>, by insertion rather than
+// re-serialising: parsing and re-emitting the whole document would risk
+// changing attributes, entity forms or namespace prefixes on results that were
+// already correct. Everything upstream sent is preserved byte for byte.
+//
+// Returns ok=false whenever the shape isn't what's expected, so a surprising
+// response is passed through untouched rather than half-rewritten — malformed
+// XML doesn't degrade for a client, it breaks the parse outright.
+func injectXMLSongs(body []byte, songs []virtualSong) ([]byte, bool) {
+	var rows strings.Builder
+	for _, s := range songs {
+		rows.WriteString(s.xmlElement())
+	}
+
+	// Normal case: a populated element to append to.
+	if i := bytes.LastIndex(body, []byte("</searchResult3>")); i >= 0 {
+		out := make([]byte, 0, len(body)+rows.Len())
+		out = append(out, body[:i]...)
+		out = append(out, rows.String()...)
+		out = append(out, body[i:]...)
+		return out, true
+	}
+
+	// Empty library result, which Navidrome emits self-closing. It has to be
+	// opened up before anything can go inside it.
+	for _, empty := range []string{"<searchResult3/>", "<searchResult3 />"} {
+		if i := bytes.Index(body, []byte(empty)); i >= 0 {
+			out := make([]byte, 0, len(body)+rows.Len()+32)
+			out = append(out, body[:i]...)
+			out = append(out, "<searchResult3>"...)
+			out = append(out, rows.String()...)
+			out = append(out, "</searchResult3>"...)
+			out = append(out, body[i+len(empty):]...)
+			return out, true
+		}
+	}
+	return nil, false
 }
 
 func (f *subsonicFacade) queuedSpotifyIDs() map[string]bool {
