@@ -315,10 +315,10 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	// already returned, so a catalog hit for one of those rows is not offered
 	// alongside it.
 	var (
-		envelope  map[string]any
-		result    map[string]any
-		songs     []any
-		ownedKeys map[string]bool
+		envelope map[string]any
+		result   map[string]any
+		songs    []any
+		owned    ownedSet
 	)
 
 	if wantJSON {
@@ -341,10 +341,10 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 			resp["searchResult3"] = result
 		}
 		songs, _ = result["song"].([]any)
-		ownedKeys = ownedKeySetJSON(songs)
+		owned = ownedSetJSON(songs)
 	} else {
 		var ok bool
-		ownedKeys, _, ok = ownedKeySetXML(body)
+		owned, _, ok = ownedSetXML(body)
 		if !ok {
 			writeRaw(w, ct, body)
 			return
@@ -365,7 +365,7 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	virtual := f.virtualSongs(tracks, ownedKeys)
+	virtual := f.virtualSongs(tracks, owned)
 	if len(virtual) == 0 {
 		writeRaw(w, ct, body)
 		return
@@ -478,7 +478,7 @@ func (v virtualSong) xmlElement() string {
 
 // virtualSongs turns Spotify hits into acquirable rows, dropping anything
 // already owned or already on its way.
-func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys map[string]bool) []virtualSong {
+func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned ownedSet) []virtualSong {
 	states := f.acquisitionStates()
 
 	// Two ownership signals, unioned. Navidrome's own results are the
@@ -489,7 +489,10 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys m
 	// suppressing it is worth one cheap extra check.
 	inputs := make([]LibMatchInput, 0, len(tracks))
 	for i, t := range tracks {
-		inputs = append(inputs, LibMatchInput{Index: i, Title: t.Name, Artist: firstArtist(t.Artists)})
+		// The whole credit, not firstArtist: MatchLibrary compares artists as a
+		// set now, and trimming the list here would throw away the very names
+		// that let a differently-ordered credit match.
+		inputs = append(inputs, LibMatchInput{Index: i, Title: t.Name, Artist: t.Artists})
 	}
 	indexed := map[int]bool{}
 	for _, m := range f.app.MatchLibrary(inputs) {
@@ -504,7 +507,7 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys m
 		if t.ID == "" || t.Name == "" {
 			continue
 		}
-		if indexed[i] || ownedKeys[nameKey(t.Name, t.Artists)] {
+		if indexed[i] || owned.has(t.Name, t.Artists) {
 			continue
 		}
 
@@ -534,10 +537,35 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, ownedKeys m
 	return out
 }
 
-// ownedKeySetJSON indexes the songs Navidrome just returned, so a catalog hit
+// ownedSet indexes the songs Navidrome just returned by loose title, keeping
+// every artist credit seen under each one. A title bucket plus an artist test,
+// rather than one title|artist key, because the two sides spell an artist list
+// differently and don't agree on who is billed first — see artistsOverlap.
+type ownedSet map[string][]string
+
+func (s ownedSet) add(title, artist string) {
+	if k := titleKey(title); k != "" {
+		s[k] = append(s[k], artist)
+	}
+}
+
+func (s ownedSet) has(title, artist string) bool {
+	k := titleKey(title)
+	if k == "" {
+		return false
+	}
+	for _, a := range s[k] {
+		if creditsMatch(a, artist) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownedSetJSON indexes the songs Navidrome just returned, so a catalog hit
 // for something already in that same result list never appears twice.
-func ownedKeySetJSON(songs []any) map[string]bool {
-	keys := map[string]bool{}
+func ownedSetJSON(songs []any) ownedSet {
+	owned := ownedSet{}
 	for _, raw := range songs {
 		s, _ := raw.(map[string]any)
 		if s == nil {
@@ -546,17 +574,17 @@ func ownedKeySetJSON(songs []any) map[string]bool {
 		title, _ := s["title"].(string)
 		artist, _ := s["artist"].(string)
 		if title != "" {
-			keys[nameKey(title, artist)] = true
+			owned.add(title, artist)
 		}
 	}
-	return keys
+	return owned
 }
 
-// ownedKeySetXML does the same by scanning tokens, and doubles as the
+// ownedSetXML does the same by scanning tokens, and doubles as the
 // validity check for the XML path: it reports ok only for a well-formed
 // status="ok" response, so anything surprising falls through to pass-through.
-func ownedKeySetXML(body []byte) (keys map[string]bool, songCount int, ok bool) {
-	keys = map[string]bool{}
+func ownedSetXML(body []byte) (owned ownedSet, songCount int, ok bool) {
+	owned = ownedSet{}
 	dec := xml.NewDecoder(bytes.NewReader(body))
 	sawResponse, statusOK := false, false
 
@@ -589,11 +617,11 @@ func ownedKeySetXML(body []byte) (keys map[string]bool, songCount int, ok bool) 
 				}
 			}
 			if title != "" {
-				keys[nameKey(title, artist)] = true
+				owned.add(title, artist)
 			}
 		}
 	}
-	return keys, songCount, sawResponse && statusOK
+	return owned, songCount, sawResponse && statusOK
 }
 
 // injectXMLSongs splices rows into <searchResult3>, by insertion rather than
@@ -1081,33 +1109,22 @@ func findNavidromeSong(cfg navidromeConfig, title, artist string) string {
 	return ""
 }
 
-// songMatches is deliberately more forgiving than the library index's nameKey,
-// and it exists because that key got this wrong in production.
+// songMatches decides whether a Navidrome row is the track we asked for. Title
+// has to match loosely and the credits have to share a performer — the same
+// test the library index uses, so "already owned" and "found after download"
+// can never disagree about who made a record.
 //
+// It exists because the old title|firstArtist key got this wrong in production:
 // SpotiFLAC tags multiple artists separated by "•", so Navidrome reported
 // "Labh Janjua • Sonu Kakkar • Neha Kakkar" while Spotify had said
-// "Labh Janjua, Sonu Kakkar, Neha Kakkar". `firstArtist` splits on commas and
-// slashes but not bullets, so the two sides reduced to "labhjanjua" and
-// "labhjanjuasonukakkarnehakakkar" and the track was never found — the download
-// landed, and the favourite that asked for it was silently dropped.
-//
-// The shared `nameKey` is deliberately NOT changed to fix this: it also feeds
-// the strict key behind duplicate detection, where collapsing an artist list to
-// its first name would make "Nightcall — Kavinsky" and "Nightcall — Kavinsky •
-// Angèle • Phoenix" look like the same recording and offer to delete one.
-// Substring containment is safe here because the title already had to match
-// exactly and the candidate set is one search's worth of results.
+// "Labh Janjua, Sonu Kakkar, Neha Kakkar", the two sides reduced to
+// "labhjanjua" and "labhjanjuasonukakkarnehakakkar", and the track was never
+// found — the download landed and the favourite that asked for it was dropped.
 func songMatches(navTitle, navArtist, wantTitle, wantArtist string) bool {
 	if normStr(navTitle) == "" || normStr(navTitle) != normStr(wantTitle) {
 		return false
 	}
-	if wantArtist == "" {
-		return true
-	}
-	// normStr strips the separators themselves, so a bullet-, comma- or
-	// ampersand-joined list all reduce to the same run of letters.
-	have, want := normStr(navArtist), normStr(wantArtist)
-	return have == want || strings.Contains(have, want) || strings.Contains(want, have)
+	return artistsOverlap(navArtist, wantArtist)
 }
 
 // -----------------------------------------------------------------------------

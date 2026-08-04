@@ -87,21 +87,21 @@ func TestInjectXMLEmptySelfClosing(t *testing.T) {
 	}
 }
 
-func TestOwnedKeySetXML(t *testing.T) {
-	keys, count, ok := ownedKeySetXML([]byte(xmlPopulated))
+func TestOwnedSetXML(t *testing.T) {
+	owned, count, ok := ownedSetXML([]byte(xmlPopulated))
 	if !ok || count != 1 {
 		t.Fatalf("ok=%v count=%d, want true/1", ok, count)
 	}
-	// The ampersand must have been decoded before keying, or the owned-track
+	// The ampersand must have been decoded before indexing, or the owned-track
 	// filter would never match the catalog's plain-text title.
-	if !keys[nameKey("Owned & Loved", "Kavinsky")] {
-		t.Errorf("owned key not indexed: %v", keys)
+	if !owned.has("Owned & Loved", "Kavinsky") {
+		t.Errorf("owned song not indexed: %v", owned)
 	}
 }
 
 // A non-ok response must not be treated as injectable.
-func TestOwnedKeySetXMLRejectsFailure(t *testing.T) {
-	if _, _, ok := ownedKeySetXML([]byte(xmlFailed)); ok {
+func TestOwnedSetXMLRejectsFailure(t *testing.T) {
+	if _, _, ok := ownedSetXML([]byte(xmlFailed)); ok {
 		t.Error("a status=failed response was accepted for injection")
 	}
 }

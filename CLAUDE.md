@@ -184,13 +184,26 @@ IP gotcha below) — recreating containers silently invalidates it.
   re-tagged — and `noteLibraryFile()` folds each finished download into the index
   from `DownloadTrack`, so it stays current without a rescan (writes are debounced
   5s). `MatchLibrary(items)` flags tracks already present (ISRC exact, else
-  normalized title+first-artist). UI unchecks in-library tracks on album/playlist
-  fetch. Note: Spotify album/playlist track metadata usually lacks ISRC at match
-  time, so matching is effectively name-based.
+  **loose title bucket + artist-set overlap**). UI unchecks in-library tracks on
+  album/playlist fetch. Note: Spotify album/playlist track metadata usually lacks
+  ISRC at match time, so matching is effectively name-based.
+  The name test is `titleKey` + `creditsMatch`/`artistsOverlap` (`library.go`),
+  **not** a `title|firstArtist` key — that key was replaced 2026-08-04 because it
+  required both sides to bill the same artist first. SpotiFLAC tags credits with
+  `•`, Spotify sends `, `, and the order differs, so a track the user owned was
+  reported missing and offered for download again (hit constantly on Indian film
+  songs, where multi-singer credits are the norm). `titleKey` also collapses
+  `Song - From "Film"` onto `Song (From "Film")` — Spotify writes the same
+  qualifier both ways, and `normStr` already stripped the bracketed form. Two
+  rules to keep: `firstArtist`/`strictKey` are **still** untouched (they feed
+  duplicate detection, where collapsing a credit deletes music), and
+  `creditsMatch` refuses a library file with **no** artist tag rather than
+  letting it claim every track sharing its title.
 - **Duplicate cleanup** (`library_dedup.go`): `FindDuplicates()` unions indexed
   files by ISRC **and** by a *strict* name key (`normStrStrict` keeps
-  parentheticals, so "Song (Live)" never merges with the studio take — `nameKey`
-  stays loose for download-time matching). Best copy per group = lossless >
+  parentheticals, so "Song (Live)" never merges with the studio take — the
+  `titleKey`/`artistsOverlap` pair stays loose for download-time matching, and
+  dedup deliberately does not use it). Best copy per group = lossless >
   lossy, then largest, then oldest; the rest are suggested for removal.
   `CleanupDuplicates({paths, mode})` defaults to `trash` (move into
   `<library>/.spotiflac-trash/<timestamp>/`, `rename` with copy+remove fallback
@@ -227,10 +240,11 @@ IP gotcha below) — recreating containers silently invalidates it.
   - **An in-flight row stays visible** as `⏳` rather than being suppressed —
     otherwise a track is in neither list for the ~2 minutes before Navidrome
     indexes it, and reads as lost.
-  - Reconciliation matches with `songMatches`, **not** `nameKey`: SpotiFLAC tags
-    multiple artists with `•` and `firstArtist` doesn't split on it. Do not "fix"
-    `firstArtist` — it also feeds duplicate detection, where collapsing an artist
-    list would offer to delete real music.
+  - Reconciliation matches with `songMatches`, which since 2026-08-04 shares its
+    artist test (`artistsOverlap`) with the library index — one notion of who made
+    a record, so "already owned" and "found after download" can't disagree. Do not
+    "fix" `firstArtist` — it still feeds duplicate detection, where collapsing an
+    artist list would offer to delete real music.
   - **Known gap:** the gateway checks a returned document *is* a FLAC, never that
     it's the one requested, so a duplicate reply can in principle be attributed to
     the next job. Retuning the resend made it unlikely, not impossible.

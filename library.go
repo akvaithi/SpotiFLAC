@@ -59,7 +59,7 @@ type libraryIndex struct {
 	dir      string
 	entries  map[string]*libraryEntry // keyed by absolute path
 	isrc     map[string][]string      // ISRC -> paths
-	names    map[string][]string      // loose title|artist -> paths
+	titles   map[string][]string      // loose title -> paths (artist checked per candidate)
 	scanned  time.Time
 	updated  time.Time
 	lastErr  string
@@ -71,17 +71,28 @@ type libraryIndex struct {
 var library = &libraryIndex{
 	entries: map[string]*libraryEntry{},
 	isrc:    map[string][]string{},
-	names:   map[string][]string{},
+	titles:  map[string][]string{},
 }
 
 var (
 	reParen = regexp.MustCompile(`[\(\[][^\)\]]*[\)\]]`)
 	reFeat  = regexp.MustCompile(`(?i)\b(feat|ft|featuring|with)\b.*$`)
+	// Spotify writes the same version qualifier two ways — `Vaa Vaathi (From
+	// "Vaathi")` on the album, `Vaa Vaathi - From "Vaathi"` on the single — and
+	// film catalogues are full of both spellings of one recording. reParen
+	// already collapses the bracketed form, so the dash form has to collapse
+	// too or the copy on disk never matches the copy in a search result.
+	reDashSuffix = regexp.MustCompile(`\s+[-–—]\s+.*$`)
+	// Every separator seen between artist names across the sources that have to
+	// agree: SpotiFLAC's own tagger ("•"), Spotify (", ") and whatever a file
+	// scanned from disk was tagged with elsewhere.
+	reArtistSep = regexp.MustCompile(`(?i)\s*(?:[•·,;/&|]|\bx\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*`)
 )
 
 func normStr(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = reParen.ReplaceAllString(s, "")
+	s = reDashSuffix.ReplaceAllString(s, "")
 	s = reFeat.ReplaceAllString(s, "")
 	return keepAlphanumeric(s)
 }
@@ -114,13 +125,69 @@ func firstArtist(artist string) string {
 	return artist
 }
 
-func nameKey(title, artist string) string {
-	t := normStr(title)
-	a := normStr(firstArtist(artist))
-	if t == "" {
-		return ""
+// titleKey is the loose bucket every "do I already own this?" test starts from.
+// It is title-only on purpose: the artist is compared separately, as a set (see
+// artistsOverlap), because a single key made of title|firstArtist requires the
+// two sides to agree on who is billed first, and they routinely don't.
+func titleKey(title string) string {
+	return normStr(title)
+}
+
+// artistTokens splits an artist credit into the individual performers.
+func artistTokens(artist string) []string {
+	out := make([]string, 0, 4)
+	for _, part := range reArtistSep.Split(strings.ToLower(artist), -1) {
+		if t := keepAlphanumeric(part); t != "" {
+			out = append(out, t)
+		}
 	}
-	return t + "|" + a
+	return out
+}
+
+// artistsOverlap reports whether two artist credits name a performer in common.
+//
+// Set overlap, not equality, and this is what the old title|firstArtist key got
+// wrong in production: a film song is credited "G. V. Prakash Kumar • Sid
+// Sriram" by SpotiFLAC's tagger and "Sid Sriram, G. V. Prakash Kumar" by
+// Spotify, so reducing each side to its first name compared two different
+// people and reported a track the user owns as missing. Multi-singer credits
+// are the norm in Indian film music, which is why it showed up there first.
+//
+// This is for matching only. Duplicate detection keeps strictKey/firstArtist —
+// collapsing an artist list there would offer to delete real music.
+func artistsOverlap(a, b string) bool {
+	ta, tb := artistTokens(a), artistTokens(b)
+	if len(ta) == 0 || len(tb) == 0 {
+		return true // unknown on one side; the title match stands alone
+	}
+	for _, x := range ta {
+		for _, y := range tb {
+			if x == y {
+				return true
+			}
+			// "G. V. Prakash" vs "G. V. Prakash Kumar": one credit carries the
+			// fuller name. Require a real prefix and some length, so short
+			// names can't swallow each other.
+			if len(x) >= 5 && len(y) >= 5 && (strings.HasPrefix(x, y) || strings.HasPrefix(y, x)) {
+				return true
+			}
+		}
+	}
+	// Last resort for a credit no splitter can see into, e.g. a tag that joined
+	// the names with nothing at all.
+	fa, fb := keepAlphanumeric(strings.ToLower(a)), keepAlphanumeric(strings.ToLower(b))
+	return fa != "" && fb != "" && (strings.Contains(fa, fb) || strings.Contains(fb, fa))
+}
+
+// creditsMatch is artistsOverlap with the "unknown artist" hole closed: an
+// untagged file must not claim every track that shares its title. That leniency
+// is safe in songMatches, where one targeted search bounds the candidates, and
+// unsafe wherever the candidate set is the whole library.
+func creditsMatch(have, want string) bool {
+	if len(artistTokens(have)) == 0 && len(artistTokens(want)) > 0 {
+		return false
+	}
+	return artistsOverlap(have, want)
 }
 
 func strictKey(title, artist string) string {
@@ -189,13 +256,13 @@ func (l *libraryIndex) load() {
 // reindexLocked rebuilds the lookup maps from entries. Caller holds the lock.
 func (l *libraryIndex) reindexLocked() {
 	l.isrc = make(map[string][]string, len(l.entries))
-	l.names = make(map[string][]string, len(l.entries))
+	l.titles = make(map[string][]string, len(l.entries))
 	for path, e := range l.entries {
 		if e.ISRC != "" {
 			l.isrc[e.ISRC] = append(l.isrc[e.ISRC], path)
 		}
-		if k := nameKey(e.Title, e.Artist); k != "" {
-			l.names[k] = append(l.names[k], path)
+		if k := titleKey(e.Title); k != "" {
+			l.titles[k] = append(l.titles[k], path)
 		}
 	}
 }
@@ -248,7 +315,7 @@ func (l *libraryIndex) stats() LibraryStats {
 		Dir:      l.dir,
 		Files:    len(l.entries),
 		ISRCs:    len(l.isrc),
-		NameKeys: len(l.names),
+		NameKeys: len(l.titles),
 		Error:    l.lastErr,
 	}
 	if !l.scanned.IsZero() {
@@ -459,10 +526,14 @@ func (a *App) MatchLibrary(items []LibMatchInput) []LibMatchResult {
 			}
 		}
 		if !res.InLibrary {
-			if k := nameKey(it.Title, it.Artist); k != "" {
-				if len(library.names[k]) > 0 {
-					res.InLibrary = true
-					res.MatchType = "name"
+			if k := titleKey(it.Title); k != "" {
+				// Same title is the bucket; a shared performer confirms it.
+				for _, p := range library.titles[k] {
+					if e := library.entries[p]; e != nil && creditsMatch(e.Artist, it.Artist) {
+						res.InLibrary = true
+						res.MatchType = "name"
+						break
+					}
 				}
 			}
 		}

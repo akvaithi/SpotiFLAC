@@ -287,8 +287,8 @@ The virtual favourite therefore disappears at the next sync on its own.
 Better still, the facade closes the loop: once the download lands and the rescan
 completes, it looks the new track up in Navidrome and issues a **real** `star` for it.
 The favourite the user set is then genuinely true, pointing at a real, playable track.
-Matching is by `songMatches`, not the library's `nameKey` — see the comment on that
-function for why, and §5.3a for the bug that forced it.
+Matching is by `songMatches` — see the comment on that function, and §5.3a for the
+bug that forced it.
 
 **Known consequence, accepted 2026-07-31: a freshly-acquired favourite cannot be
 removed until the app relaunches.**
@@ -318,7 +318,7 @@ because it honours what the user actually asked for, and because the failure mod
 visible and recoverable rather than silent. Nothing server-side can shorten the
 window — only the client decides when to sync.
 
-### 5.3a Why matching does not use `nameKey`
+### 5.3a Why artists are matched as a set
 
 The first real acquisition through the app looked like it worked — the FLAC landed,
 Navidrome indexed it, the track was playable — and the favourite was silently dropped.
@@ -338,15 +338,25 @@ not made. That helper also feeds `normStrStrict` behind duplicate detection
 offer to delete one as a duplicate. A matching bug in a favourite is an annoyance; a
 matching bug in dedup deletes music.
 
-So `songMatches` is local to the facade: exact normalized title, then substring
-containment on artists, which is separator-agnostic because `normStr` strips the
-separators themselves. Safe here because the title must already match exactly and the
-candidate set is one search's worth of rows.
+So the artist test became a **set overlap**: `artistTokens` splits a credit on every
+separator the three sources use (`• · , ; / & |`, ` x `, `feat.`/`ft.`/`with`), and
+`artistsOverlap` (`library.go`) passes when the two credits name any performer in
+common — plus a prefix rule, so *G. V. Prakash* matches *G. V. Prakash Kumar*.
+`songMatches` is exact normalized title, then that. Neither side has to bill the same
+artist first, or list the same number of singers.
 
-**Still outstanding:** `MatchLibrary` has the same blind spot, so §5.1's ownership
-filter can miss a multi-artist track you already own and offer a `↓` row for it.
-Harmless — enqueueing a duplicate is caught downstream — but it is the same root
-cause and is not fixed.
+**Fixed 2026-08-04:** `MatchLibrary` had the same blind spot, and it was not harmless
+— §5.1's ownership filter offered a `↓` row for tracks the user already owned, on
+essentially every multi-singer Indian film song (reported for *Vaa Vaathi*). Both the
+index and the in-result owned set now key on `titleKey` alone and confirm the artist
+with `creditsMatch`, the same overlap test. Two guards go with it: `titleKey` collapses
+`Song - From "Film"` onto `Song (From "Film")` (Spotify writes the qualifier both ways;
+`normStr` already stripped the bracketed form), and `creditsMatch` refuses a library
+file carrying **no** artist tag rather than letting it claim every same-titled track —
+the leniency `artistsOverlap` allows for an unknown artist is safe only in
+`songMatches`, where one search bounds the candidates.
+
+`firstArtist` and `strictKey` are untouched and still back duplicate detection.
 
 ### 5.4 `createPlaylist` / `updatePlaylist` — secondary trigger, with a destination
 
