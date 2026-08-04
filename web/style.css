@@ -72,6 +72,10 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .bar>span{display:block;height:100%;background:var(--accent);width:0}
 
 .track.in-lib{opacity:.55}
+/* Not in Deezer's catalog: dimmer than "already owned", and struck through,
+   because this row can never become a download however long you wait. */
+.track.unavailable{opacity:.4}
+.track.unavailable .t{text-decoration:line-through}
 .st.completed{color:var(--accent)} .st.failed{color:var(--danger)}
 .st.downloading{color:#e6c02a} .st.skipped{color:var(--muted)}
 

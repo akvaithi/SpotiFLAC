@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -159,7 +160,7 @@ func (f *FlacItDownloader) Download(
 		}
 	}()
 
-	trackURL := f.resolveTrackURL(spotifyID)
+	trackURL := f.resolveTrackURLFor(spotifyID, trackName, artistName, 0)
 	f.SourceURL = trackURL
 	f.SourceLabel = fmt.Sprintf("%s - %s", artistName, trackName)
 
@@ -329,6 +330,13 @@ func PrewarmDeezerURL(spotifyID string) {
 // already chains song.link's Deezer match, an ISRC lookup, and Deezer's ISRC
 // API as internal fallbacks, so there's nothing left to retry here.
 func (f *FlacItDownloader) resolveTrackURL(spotifyID string) string {
+	return f.resolveTrackURLFor(spotifyID, "", "", 0)
+}
+
+// resolveTrackURLFor adds the Deezer catalog as a last resort before giving up
+// on a Deezer link. The name and duration are only used there; callers without
+// them get exactly the old behaviour.
+func (f *FlacItDownloader) resolveTrackURLFor(spotifyID, trackName, artistName string, durationMS int) string {
 	if url := ResolveDeezerURL(spotifyID); url != "" {
 		// Last check before the bot sees it. A resolver that answers with an
 		// artist or album page produces a link the bot cannot act on, and the
@@ -340,6 +348,29 @@ func (f *FlacItDownloader) resolveTrackURL(spotifyID string) string {
 		}
 		fmt.Printf("Resolver returned a non-track Deezer link (%s); using the Spotify link instead\n", url)
 	}
+
+	// The song.link chain failed or produced nothing usable. Ask Deezer itself
+	// before falling back to a Spotify link the bot has to resolve on its own:
+	// a verified hit here is an exact track id, which is the strongest form of
+	// this request the bot can be given.
+	if trackName != "" {
+		ctx, cancel := context.WithTimeout(ActiveDownloadContext(), 20*time.Second)
+		defer cancel()
+		match, err := FindDeezerTrack(ctx, DeezerLookup{
+			SpotifyID:  spotifyID,
+			Title:      trackName,
+			Artists:    artistName,
+			DurationMS: durationMS,
+		})
+		if err == nil && match != nil {
+			fmt.Printf("Found Deezer track %d via %s: %s\n", match.Track.ID, match.Method, match.Track.FullTitle())
+			return match.Track.TrackURL()
+		}
+		if err != nil {
+			fmt.Printf("Deezer catalog lookup: %v\n", err)
+		}
+	}
+
 	return "https://open.spotify.com/track/" + spotifyID
 }
 

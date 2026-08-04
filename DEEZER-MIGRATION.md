@@ -1,6 +1,20 @@
 # Deezer as the catalog — design
 
-**Status: proposed, awaiting sign-off. Nothing below is built.**
+**Status: steps 1–2 landed 2026-08-04. Steps 3–6 not built.**
+
+Landed: `backend/deezer.go` (client), `backend/deezer_translate.go` (verified
+translation), `backend/match.go` (comparison helpers, moved down from
+`package main` so both packages share one implementation),
+`CheckDeezerAvailability` + the "✗ not on Deezer" row state in the web UI, and
+the catalog lookup as a last resort inside `resolveTrackURL`.
+
+Verified live from the box: the release that failed three 270s attempts is
+reported missing in **0.89s**; the copy that did download resolves by ISRC; the
+search path accepts `Vaa Vaathi (From "Vaathi")` only after verification.
+
+Still to do: the `sf-dz:` id namespace, facade `search3` on Deezer, tagging from
+Deezer detail (including the lyrics contributor handling below), web UI catalog
+paths, related artists / discography.
 
 Today Spotify is the catalog and Deezer is the source. Everything the user can
 see comes from Spotify's metadata; everything they can actually *get* comes from

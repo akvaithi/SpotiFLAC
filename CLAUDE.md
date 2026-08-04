@@ -34,8 +34,19 @@ doesn't carry fails into the queue's failed list rather than retrying elsewhere.
 - `auth.go` — optional `API_TOKEN` bearer auth, off by default (see below).
 - `discovery.go` + `backend/discovery.go` — related artists / band members.
 - `library.go` — dedup index (see below).
+- `deezer_availability.go` — `CheckDeezerAvailability` RPC: does the *source*
+  carry these tracks, answered at paste time instead of as a bot timeout four
+  minutes later. Three outcomes, and `unknown` matters as much as the other two —
+  a blocked API must never render as "not available" (see `DEEZER-MIGRATION.md`).
 - `app.go` — the old Wails bindings, de-Wailsed (dialogs stubbed, events → SSE).
   Holds `DownloadTrack` and all `*App` methods.
+- `backend/deezer.go` + `backend/deezer_translate.go` — the Deezer catalog client
+  and Spotify→Deezer translation (ISRC first, then a `artist:"X" track:"Y"` search
+  accepted **only** on exact normalized title + artist overlap + duration within
+  ±2s). `backend/match.go` holds the comparison helpers, which `package main`
+  wraps — one implementation, because the library index and the translator must
+  not disagree about what counts as the same recording. Step 1–2 of
+  `DEEZER-MIGRATION.md`; the catalog is not yet the search source.
 - `backend/flacit.go` — the download engine: resolves a Deezer link, drives the
   gateway's job API, tags the result. `GetFlacItGatewayURL()` in `backend/config.go`
   resolves the gateway address (env → setting → docker0 default).

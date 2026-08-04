@@ -477,6 +477,45 @@ async function markLibraryDuplicates() {
   });
   const note = $('dupeNote');
   if (note) note.textContent = dupes ? `${dupes} track(s) already in your library were unchecked.` : '';
+
+  markDeezerAvailability(res || []);
+}
+
+// Deezer is the only source, so a track it doesn't carry cannot be downloaded
+// however good the metadata looks. Saying so here costs one lookup; the
+// alternative is finding out ~4 minutes later as a bot timeout, three retries
+// deep, with nothing to distinguish "not in the catalog" from "something broke".
+async function markDeezerAvailability(libraryResults) {
+  const owned = new Set((libraryResults || []).filter(r => r.in_library).map(r => r.index));
+  const items = state.tracks
+    .map((t, i) => ({ index: i, spotify_id: t.spotify_id || t.id || '', isrc: t.isrc || '',
+                      title: t.name || '', artist: t.artists || '', duration_ms: t.duration_ms || 0 }))
+    .filter(it => !owned.has(it.index));   // already owned: nothing to acquire
+  if (!items.length) return;
+
+  let res;
+  try { res = await rpc('CheckDeezerAvailability', items); } catch { return; }
+
+  let missing = 0;
+  (res || []).forEach(r => {
+    // `unknown` means the check itself failed. Leaving the row untouched is the
+    // point — telling someone their music doesn't exist because a request timed
+    // out is worse than saying nothing.
+    if (r.unknown || r.available) return;
+    missing++;
+    const cb = document.querySelector(`.sel[data-i="${r.index}"]`);
+    if (cb) { cb.checked = false; cb.disabled = true; }
+    const st = $('st-' + r.index);
+    if (st) { st.textContent = '✗ not on Deezer'; st.className = 'st skipped'; }
+    const row = cb ? cb.closest('.track') : null;
+    if (row) row.classList.add('unavailable');
+  });
+
+  const note = $('dupeNote');
+  if (note && missing) {
+    note.textContent = (note.textContent ? note.textContent + ' ' : '') +
+      `${missing} track(s) aren't in Deezer's catalog and can't be downloaded.`;
+  }
 }
 
 // ---------- settings ----------

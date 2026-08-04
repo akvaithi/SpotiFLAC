@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/akvaithi/SpotiFLAC/backend"
 )
@@ -74,28 +73,20 @@ var library = &libraryIndex{
 	titles:  map[string][]string{},
 }
 
-var (
-	reParen = regexp.MustCompile(`[\(\[][^\)\]]*[\)\]]`)
-	reFeat  = regexp.MustCompile(`(?i)\b(feat|ft|featuring|with)\b.*$`)
-	// Spotify writes the same version qualifier two ways — `Vaa Vaathi (From
-	// "Vaathi")` on the album, `Vaa Vaathi - From "Vaathi"` on the single — and
-	// film catalogues are full of both spellings of one recording. reParen
-	// already collapses the bracketed form, so the dash form has to collapse
-	// too or the copy on disk never matches the copy in a search result.
-	reDashSuffix = regexp.MustCompile(`\s+[-–—]\s+.*$`)
-	// Every separator seen between artist names across the sources that have to
-	// agree: SpotiFLAC's own tagger ("•"), Spotify (", ") and whatever a file
-	// scanned from disk was tagged with elsewhere.
-	reArtistSep = regexp.MustCompile(`(?i)\s*(?:[•·,;/&|]|\bx\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*`)
-)
+// The canonical implementations live in backend/match.go — Deezer translation
+// needs the same answers, and two copies would drift. These wrappers keep the
+// call sites here reading the way they always have.
+var reFeat = regexp.MustCompile(`(?i)\b(feat|ft|featuring|with)\b.*$`)
 
-func normStr(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	s = reParen.ReplaceAllString(s, "")
-	s = reDashSuffix.ReplaceAllString(s, "")
-	s = reFeat.ReplaceAllString(s, "")
-	return keepAlphanumeric(s)
-}
+func normStr(s string) string { return backend.NormalizeTitle(s) }
+
+func keepAlphanumeric(s string) string { return backend.KeepAlphanumeric(s) }
+
+func artistTokens(artist string) []string { return backend.ArtistTokens(artist) }
+
+func artistsOverlap(a, b string) bool { return backend.ArtistsOverlap(a, b) }
+
+func creditsMatch(have, want string) bool { return backend.CreditsMatch(have, want) }
 
 // normStrStrict keeps parenthetical content, so "Song (Live)" and
 // "Song (Radio Edit)" stay distinct. Used for duplicate grouping, where a false
@@ -104,16 +95,6 @@ func normStrStrict(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = reFeat.ReplaceAllString(s, "")
 	return keepAlphanumeric(s)
-}
-
-func keepAlphanumeric(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 func firstArtist(artist string) string {
@@ -131,63 +112,6 @@ func firstArtist(artist string) string {
 // two sides to agree on who is billed first, and they routinely don't.
 func titleKey(title string) string {
 	return normStr(title)
-}
-
-// artistTokens splits an artist credit into the individual performers.
-func artistTokens(artist string) []string {
-	out := make([]string, 0, 4)
-	for _, part := range reArtistSep.Split(strings.ToLower(artist), -1) {
-		if t := keepAlphanumeric(part); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// artistsOverlap reports whether two artist credits name a performer in common.
-//
-// Set overlap, not equality, and this is what the old title|firstArtist key got
-// wrong in production: a film song is credited "G. V. Prakash Kumar • Sid
-// Sriram" by SpotiFLAC's tagger and "Sid Sriram, G. V. Prakash Kumar" by
-// Spotify, so reducing each side to its first name compared two different
-// people and reported a track the user owns as missing. Multi-singer credits
-// are the norm in Indian film music, which is why it showed up there first.
-//
-// This is for matching only. Duplicate detection keeps strictKey/firstArtist —
-// collapsing an artist list there would offer to delete real music.
-func artistsOverlap(a, b string) bool {
-	ta, tb := artistTokens(a), artistTokens(b)
-	if len(ta) == 0 || len(tb) == 0 {
-		return true // unknown on one side; the title match stands alone
-	}
-	for _, x := range ta {
-		for _, y := range tb {
-			if x == y {
-				return true
-			}
-			// "G. V. Prakash" vs "G. V. Prakash Kumar": one credit carries the
-			// fuller name. Require a real prefix and some length, so short
-			// names can't swallow each other.
-			if len(x) >= 5 && len(y) >= 5 && (strings.HasPrefix(x, y) || strings.HasPrefix(y, x)) {
-				return true
-			}
-		}
-	}
-	// Last resort for a credit no splitter can see into, e.g. a tag that joined
-	// the names with nothing at all.
-	fa, fb := keepAlphanumeric(strings.ToLower(a)), keepAlphanumeric(strings.ToLower(b))
-	return fa != "" && fb != "" && (strings.Contains(fa, fb) || strings.Contains(fb, fa))
-}
-
-// creditsMatch is artistsOverlap with the "unknown artist" hole closed: an
-// untagged file must not claim every track that shares its title. That leniency
-// is safe in songMatches, where one targeted search bounds the candidates, and
-// unsafe wherever the candidate set is the whole library.
-func creditsMatch(have, want string) bool {
-	if len(artistTokens(have)) == 0 && len(artistTokens(want)) > 0 {
-		return false
-	}
-	return artistsOverlap(have, want)
 }
 
 // artistSetKey identifies a credit by *who is in it*, independent of how it was
