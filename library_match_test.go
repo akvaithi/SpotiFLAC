@@ -48,6 +48,40 @@ func TestTitleKeyCollapsesVersionQualifiers(t *testing.T) {
 	}
 }
 
+// Dedup groups on strictKey and then moves files to the trash, so its
+// boundaries are about what must NOT merge as much as what must.
+func TestStrictKeyGroupsOnlyTheSameCredit(t *testing.T) {
+	same := [][2][2]string{
+		// Separator and billing order differ; same two performers.
+		{{"Nightcall", "Kavinsky • Angèle"}, {"Nightcall", "Angèle, Kavinsky"}},
+		{{"Vaa Vaathi", "G. V. Prakash Kumar • Shweta Mohan"}, {"Vaa Vaathi", "G. V. Prakash Kumar & Shweta Mohan"}},
+		{{"Intro", ""}, {"Intro", ""}},
+	}
+	for _, p := range same {
+		if strictKey(p[0][0], p[0][1]) != strictKey(p[1][0], p[1][1]) {
+			t.Errorf("should group: %v vs %v", p[0], p[1])
+		}
+	}
+
+	differ := [][2][2]string{
+		// The warning case: a guest credit is a different recording, and
+		// merging it would offer to delete one of the two.
+		{{"Nightcall", "Kavinsky"}, {"Nightcall", "Kavinsky • Angèle • Phoenix"}},
+		// Versions stay apart — strictKey keeps parentheticals.
+		{{"Song (Live)", "Kavinsky"}, {"Song", "Kavinsky"}},
+		{{"Song (Live)", "Kavinsky"}, {"Song (Radio Edit)", "Kavinsky"}},
+		// Same title, unrelated artists.
+		{{"Intro", "Kendrick Lamar"}, {"Intro", "The xx"}},
+		// An untagged file must not merge with a tagged one.
+		{{"Intro", ""}, {"Intro", "Kendrick Lamar"}},
+	}
+	for _, p := range differ {
+		if strictKey(p[0][0], p[0][1]) == strictKey(p[1][0], p[1][1]) {
+			t.Errorf("must not group: %v vs %v (key %q)", p[0], p[1], strictKey(p[0][0], p[0][1]))
+		}
+	}
+}
+
 func TestMatchLibraryAcrossCreditSpellings(t *testing.T) {
 	saved := library
 	t.Cleanup(func() { library = saved })

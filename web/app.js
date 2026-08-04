@@ -458,7 +458,10 @@ $('emptyTrash').onclick = async () => {
 // Given the fetched track list, mark which are already in the library.
 async function markLibraryDuplicates() {
   if (!state.tracks || !state.tracks.length) return;
-  const items = state.tracks.map((t, i) => ({ index: i, isrc: t.isrc || '', title: t.name || '', artist: t.artists || '' }));
+  // spotify_id lets the server recover an ISRC from its cache — album and
+  // playlist metadata almost never carries one, so without it every match here
+  // falls back to comparing names.
+  const items = state.tracks.map((t, i) => ({ index: i, isrc: t.isrc || '', spotify_id: t.spotify_id || t.id || '', title: t.name || '', artist: t.artists || '' }));
   let res;
   try { res = await rpc('MatchLibrary', items); } catch { return; }
   let dupes = 0;

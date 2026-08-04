@@ -164,7 +164,7 @@ func (f *FlacItDownloader) Download(
 	f.SourceLabel = fmt.Sprintf("%s - %s", artistName, trackName)
 
 	fmt.Printf("Fetching via Telegram gateway: %s\n", trackURL)
-	jobID, err := f.submitFetch(trackURL)
+	jobID, err := f.submitFetch(trackURL, trackName, artistName)
 	if err != nil {
 		return "", fmt.Errorf("gateway: %w", err)
 	}
@@ -335,8 +335,16 @@ func (f *FlacItDownloader) resolveTrackURL(spotifyID string) string {
 	return "https://open.spotify.com/track/" + spotifyID
 }
 
-func (f *FlacItDownloader) submitFetch(trackURL string) (string, error) {
-	body, err := json.Marshal(map[string]string{"url": trackURL})
+// submitFetch queues a fetch, telling the gateway what the reply should be.
+// The expectation is what lets it reject a duplicate or late reply for some
+// other track instead of filing it under this one's name; a gateway that
+// predates the field ignores it and behaves as before.
+func (f *FlacItDownloader) submitFetch(trackURL, trackName, artistName string) (string, error) {
+	body, err := json.Marshal(map[string]string{
+		"url":    trackURL,
+		"title":  trackName,
+		"artist": artistName,
+	})
 	if err != nil {
 		return "", err
 	}

@@ -190,13 +190,33 @@ func creditsMatch(have, want string) bool {
 	return artistsOverlap(have, want)
 }
 
+// artistSetKey identifies a credit by *who is in it*, independent of how it was
+// written or who was billed first: "A • B", "B, A" and "A & B" all key alike.
+//
+// Set equality, deliberately not the overlap used for matching. Overlap would
+// merge "Nightcall — Kavinsky" with "Nightcall — Kavinsky • Angèle • Phoenix",
+// which are different recordings, and dedup acts on its groups by moving files
+// to the trash. A missed duplicate is untidy; a wrong merge offers to delete
+// music the user meant to keep.
+func artistSetKey(artist string) string {
+	tokens := artistTokens(artist)
+	sort.Strings(tokens)
+	return strings.Join(tokens, "+")
+}
+
+// strictKey groups duplicates: strict title (parentheticals kept, so
+// "Song (Live)" never merges with the studio take) plus the full artist set.
+//
+// The artist half was `firstArtist`, which meant the two files had to agree on
+// billing order and on separators to group at all — so the same recording
+// tagged "Kavinsky • Angèle" by one download and "Angèle, Kavinsky" by another
+// was never offered for cleanup.
 func strictKey(title, artist string) string {
 	t := normStrStrict(title)
-	a := normStrStrict(firstArtist(artist))
 	if t == "" {
 		return ""
 	}
-	return t + "|" + a
+	return t + "|" + artistSetKey(artist)
 }
 
 func libraryIndexPath() string {
@@ -500,10 +520,14 @@ func forgetLibraryFiles(paths []string) {
 }
 
 type LibMatchInput struct {
-	Index  int    `json:"index"`
-	ISRC   string `json:"isrc,omitempty"`
-	Title  string `json:"title"`
-	Artist string `json:"artist"`
+	Index int    `json:"index"`
+	ISRC  string `json:"isrc,omitempty"`
+	// SpotifyID lets MatchLibrary recover an ISRC the caller doesn't have.
+	// Spotify's search and album/playlist responses mostly omit it, so without
+	// this the exact branch below never fires and everything rests on names.
+	SpotifyID string `json:"spotify_id,omitempty"`
+	Title     string `json:"title"`
+	Artist    string `json:"artist"`
 }
 
 type LibMatchResult struct {
@@ -513,13 +537,33 @@ type LibMatchResult struct {
 }
 
 // MatchLibrary reports which of the given tracks already exist in the index.
+//
+// ISRC first, names second. The ISRC branch used to be dead in practice —
+// callers rarely have one — so the cache is consulted for any item that brought
+// a Spotify id instead. That cache is filled by every download and every link
+// resolution, which means anything acquired through SpotiFLAC matches exactly
+// from then on, and only tracks it has never seen fall back to name matching.
 func (a *App) MatchLibrary(items []LibMatchInput) []LibMatchResult {
+	// Outside the library lock: this reads a different database, and holding a
+	// lock across it would block scans and finished downloads for no reason.
+	missing := make([]string, 0, len(items))
+	for _, it := range items {
+		if strings.TrimSpace(it.ISRC) == "" && strings.TrimSpace(it.SpotifyID) != "" {
+			missing = append(missing, strings.TrimSpace(it.SpotifyID))
+		}
+	}
+	cached := backend.GetCachedISRCsOnly(missing)
+
 	library.mu.RLock()
 	defer library.mu.RUnlock()
 	out := make([]LibMatchResult, 0, len(items))
 	for _, it := range items {
 		res := LibMatchResult{Index: it.Index}
-		if isrc := strings.ToUpper(strings.TrimSpace(it.ISRC)); isrc != "" {
+		isrc := strings.ToUpper(strings.TrimSpace(it.ISRC))
+		if isrc == "" {
+			isrc = cached[strings.TrimSpace(it.SpotifyID)]
+		}
+		if isrc != "" {
 			if len(library.isrc[isrc]) > 0 {
 				res.InLibrary = true
 				res.MatchType = "isrc"

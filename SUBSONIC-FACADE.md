@@ -206,17 +206,23 @@ Forward the query to Navidrome and decode the response. Then call
 `backend.SearchSpotify(ctx, query, limit)` (already exists, `app.go:505`) and append
 its `Tracks` as virtual songs to the `song` array, **after** every real result.
 
-Two filters before appending:
+Two filters and an ordering before appending:
 
 - **Drop anything already owned.** Run the candidates through `MatchLibrary`
-  (`library.go:449`) — ISRC exact, else normalized title + first artist. Note the
-  known limitation recorded in `CLAUDE.md`: Spotify search results usually lack ISRC,
-  so this is effectively name-based, and it is *stricter* than Navidrome's own
-  matching. A false "not owned" shows a `↓` row for a track you already have;
-  enqueueing it is harmless (the duplicate finder catches it) but it is noise.
-  **Open question in §12.**
+  (`library.go`) — ISRC exact, else a loose title bucket confirmed by artist-set
+  overlap. Both signals were strengthened on 2026-08-04 (see §5.3a): the ISRC
+  branch used to be dead because search results carry none, so callers now pass
+  `spotify_id` and the server recovers an ISRC from its own cache, and the name
+  test no longer requires the two sides to bill the same artist first.
 - **Cap at 10.** Search results are a list someone is scanning; a wall of
   unownable rows below the real ones is worse than a short one.
+- **Rank by `queryRelevance` first**, so the cap isn't spent on neighbours:
+  Spotify's relevance returns "Vaathi Raid" and "Vaaji Vaaji" for "Vaa Vaathi"
+  alongside tracks actually called that. Three coarse tiers (exact normalized
+  title, title containing the query, everything else) with Spotify's own order
+  stable within each. Ordering only — never a filter, and it may look **only** at
+  the query. Anything keyed to how well the library answered repeats the
+  adaptive-budget bug in §5.1.
 
 **Latency, measured 2026-07-31 — this is the part that needed rethinking.**
 
@@ -705,10 +711,14 @@ player worth switching to? If the answer is no, none of phases 1–7 need writin
 
 ## 14. Open questions
 
-1. **Ownership filtering fidelity.** `MatchLibrary` is stricter than Navidrome and
-   was once measured producing a 26-of-36 false-negative rate on a playlist import.
-   §5.1 now unions it with Navidrome's own returned rows, which covers the common
-   case, but a track owned and *not* in that page of results can still be offered.
+1. ~~**Ownership filtering fidelity.**~~ **Largely answered 2026-08-04.** The
+   26-of-36 false-negative rate had a specific cause, found from the *Vaa Vaathi*
+   report: the title|firstArtist key required both sides to bill the same artist
+   first, which multi-singer credits routinely don't. Artists are now matched as a
+   set, ISRC is recovered from the local cache so the exact branch actually fires,
+   and §5.1 still unions with Navidrome's own rows. What remains is the residue:
+   a track owned under a genuinely different title, not in that page of results,
+   with no cached ISRC, can still be offered.
 2. **Does `AddMusicSheet` multi-select reach search results?** If it does, album-scale
    acquisition is one flow rather than ten context menus, and §7's second consequence
    softens considerably. Needs checking against the shipped app.

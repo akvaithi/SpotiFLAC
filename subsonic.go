@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -365,7 +366,7 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	virtual := f.virtualSongs(tracks, owned)
+	virtual := f.virtualSongs(query, tracks, owned)
 	if len(virtual) == 0 {
 		writeRaw(w, ct, body)
 		return
@@ -478,7 +479,7 @@ func (v virtualSong) xmlElement() string {
 
 // virtualSongs turns Spotify hits into acquirable rows, dropping anything
 // already owned or already on its way.
-func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned ownedSet) []virtualSong {
+func (f *subsonicFacade) virtualSongs(query string, tracks []backend.SearchResult, owned ownedSet) []virtualSong {
 	states := f.acquisitionStates()
 
 	// Two ownership signals, unioned. Navidrome's own results are the
@@ -491,19 +492,18 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned owned
 	for i, t := range tracks {
 		// The whole credit, not firstArtist: MatchLibrary compares artists as a
 		// set now, and trimming the list here would throw away the very names
-		// that let a differently-ordered credit match.
-		inputs = append(inputs, LibMatchInput{Index: i, Title: t.Name, Artist: t.Artists})
+		// that let a differently-ordered credit match. The id comes along so it
+		// can try a cached ISRC first — search results never carry one.
+		inputs = append(inputs, LibMatchInput{Index: i, SpotifyID: t.ID, Title: t.Name, Artist: t.Artists})
 	}
 	indexed := map[int]bool{}
 	for _, m := range f.app.MatchLibrary(inputs) {
 		indexed[m.Index] = m.InLibrary
 	}
 
-	out := make([]virtualSong, 0, maxInjectedSongs)
+	eligible := make([]backend.SearchResult, 0, len(tracks))
+	pending := make(map[string]bool, len(tracks))
 	for i, t := range tracks {
-		if len(out) >= maxInjectedSongs {
-			break
-		}
 		if t.ID == "" || t.Name == "" {
 			continue
 		}
@@ -522,7 +522,27 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned owned
 		if state == backend.QueueCompleted {
 			continue
 		}
+		pending[t.ID] = state != ""
+		eligible = append(eligible, t)
+	}
 
+	// Order by how directly each hit answers what was typed, before the cap
+	// takes the top ten. Spotify's own relevance ranks a partial word match
+	// ("Vaathi Raid", "Vaaji Vaaji" for "Vaa Vaathi") alongside tracks actually
+	// called that, and the cap then spends its budget on them.
+	//
+	// Ordering, never filtering, and it looks only at the query — nothing here
+	// may depend on how well the library answered. That premise is what made
+	// acquisition rows silently vanish for well-covered searches once already.
+	sort.SliceStable(eligible, func(i, j int) bool {
+		return queryRelevance(query, eligible[i].Name) > queryRelevance(query, eligible[j].Name)
+	})
+
+	out := make([]virtualSong, 0, maxInjectedSongs)
+	for _, t := range eligible {
+		if len(out) >= maxInjectedSongs {
+			break
+		}
 		f.remember(t)
 		out = append(out, virtualSong{
 			SpotifyID: t.ID,
@@ -531,10 +551,28 @@ func (f *subsonicFacade) virtualSongs(tracks []backend.SearchResult, owned owned
 			Album:     t.AlbumName,
 			HasCover:  t.Images != "",
 			Duration:  t.Duration / 1000,
-			Pending:   state != "",
+			Pending:   pending[t.ID],
 		})
 	}
 	return out
+}
+
+// queryRelevance scores how directly a title answers the text that was typed.
+// Coarse on purpose — three tiers, and Spotify's own ordering breaks ties
+// within each, because a cleverer score is a thing to debug later.
+func queryRelevance(query, title string) int {
+	q, t := normStr(query), normStr(title)
+	if q == "" || t == "" {
+		return 0
+	}
+	switch {
+	case t == q:
+		return 2 // called exactly what was asked for
+	case strings.Contains(t, q):
+		return 1 // the query plus a qualifier, a cover, a version
+	default:
+		return 0 // matched on a word or two — a neighbour, not the thing
+	}
 }
 
 // ownedSet indexes the songs Navidrome just returned by loose title, keeping

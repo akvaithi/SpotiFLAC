@@ -105,6 +105,46 @@ func GetCachedISRC(trackID string) (string, error) {
 	return cachedISRC, nil
 }
 
+// GetCachedISRCsOnly looks several track ids up in one read transaction and
+// returns only the ones already known. Never fetches: this exists for the
+// matching paths, which run inside a search budget and must not make a network
+// call per row — a miss just falls back to matching by name.
+func GetCachedISRCsOnly(trackIDs []string) map[string]string {
+	found := map[string]string{}
+	if len(trackIDs) == 0 {
+		return found
+	}
+	if err := InitISRCCacheDB(); err != nil {
+		return found
+	}
+
+	_ = isrcCacheDB.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(isrcCacheBucket))
+		if bucket == nil {
+			return nil
+		}
+		for _, id := range trackIDs {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			value := bucket.Get([]byte(id))
+			if len(value) == 0 {
+				continue
+			}
+			var entry isrcCacheEntry
+			if json.Unmarshal(value, &entry) != nil {
+				continue
+			}
+			if isrc := strings.ToUpper(strings.TrimSpace(entry.ISRC)); isrc != "" {
+				found[id] = isrc
+			}
+		}
+		return nil
+	})
+	return found
+}
+
 func PutCachedISRC(trackID string, isrc string) error {
 	normalizedTrackID := strings.TrimSpace(trackID)
 	normalizedISRC := strings.ToUpper(strings.TrimSpace(isrc))

@@ -13,9 +13,13 @@ own DC — the technique from
 ## The contract it implements
 
 ```
-POST   /fetch              {"url": "<spotify or deezer track url>"} -> {"job_id", "state"}
+POST   /fetch              {"url": "<spotify or deezer track url>",
+                            "title": "<expected title>",   # optional
+                            "artist": "<expected artist>"} # optional
+                           -> {"job_id", "state"}
 GET    /fetch/<job_id>      -> {"state": resolving|downloading|ready|failed,
-                                 "filename", "size", "downloaded", "speed_mbps", "error"}
+                                 "filename", "size", "downloaded", "speed_mbps",
+                                 "mismatched", "error"}
 GET    /fetch/<job_id>/file -> streams the finished FLAC
 DELETE /fetch/<job_id>      -> drops the temp file
 ```
@@ -26,6 +30,20 @@ served synchronously from a single request. Fetches are processed **one at a
 time** — the bot chat is a single stateful conversation and a reply is matched by
 "a new inbound message after the id recorded before sending", which two
 concurrent fetches would race for.
+
+`title`/`artist` are what the reply is checked against. Without them the gateway
+accepts any FLAC newer than the send, which is how a duplicate or late reply for
+a *previous* track gets attributed to this job and filed under the wrong name.
+The bot names its files after the Deezer track, so the name is the evidence:
+`matching.py` compares it loosely (qualifiers like `- From "Film"` dropped, both
+directions of containment) and keeps waiting on a mismatch instead of accepting.
+It fails open wherever it can't judge — no expectation given, or a filename in a
+non-Latin script with nothing comparable left — because rejecting a correct file
+fails a download that would otherwise have worked. `mismatched` counts the
+rejections, and the failure message names them. `FLAC_MATCH_STRICT=0` restores
+the old accept-anything behaviour.
+
+Tests: `python3 test_matching.py` (stdlib only, no Flask or Telethon needed).
 
 ## Run it (Docker Compose)
 

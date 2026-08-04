@@ -9,7 +9,10 @@ MTProto stream is throttled to.
 
 SpotiFLAC's Go downloader talks to this over a small job API:
 
-    POST   /fetch            {"url": "<spotify or deezer track url>"} -> {job_id, state}
+    POST   /fetch            {"url": "<spotify or deezer track url>",
+                               "title": "<expected track title>",     # optional
+                               "artist": "<expected artist>"}         # optional
+                              -> {job_id, state}
     GET    /fetch/<job_id>    -> {state, filename, size, downloaded, speed_mbps, error}
     GET    /fetch/<job_id>/file  -> streams the finished FLAC
     DELETE /fetch/<job_id>    -> drops the temp file
@@ -43,6 +46,8 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify, request, send_file
 from telethon import TelegramClient, errors, events, functions, types
 from telethon.tl.types import DocumentAttributeFilename, ReplyInlineMarkup
+
+from matching import doc_text, matches_expected
 
 API_ID = int(os.environ.get("TG_API_ID", "2040"))
 API_HASH = os.environ.get("TG_API_HASH", "b18441a1ff607e10a989891a5462e627")
@@ -159,17 +164,19 @@ def _check_not_cancelled(job_id):
         raise _JobCancelled(job_id)
 
 
-def _new_job(url):
+def _new_job(url, expect=None):
     job_id = os.urandom(6).hex()
     with jobs_lock:
         jobs[job_id] = {
             "id": job_id,
             "url": url,
+            "expect": expect or {},
             "state": "queued",
             "filename": None,
             "size": 0,
             "downloaded": 0,
             "speed_mbps": 0.0,
+            "mismatched": 0,
             "error": None,
             "path": None,
             "created": time.time(),
@@ -178,7 +185,7 @@ def _new_job(url):
 
 
 def _job_view(job):
-    return {k: v for k, v in job.items() if k not in ("path", "url", "created")}
+    return {k: v for k, v in job.items() if k not in ("path", "url", "created", "expect")}
 
 
 def _is_flac(msg):
@@ -363,6 +370,7 @@ async def _process_fetch(job_id):
     with jobs_lock:
         job = jobs[job_id]
         url = job["url"]
+        expect = job.get("expect") or {}
         job["state"] = "resolving"
 
     sent_at = datetime.now(timezone.utc)
@@ -374,6 +382,7 @@ async def _process_fetch(job_id):
 
     flac_msg = None
     retried = False
+    rejected_ids = set()
     start = time.time()
     check_after = sent_at - timedelta(seconds=5)
 
@@ -387,9 +396,24 @@ async def _process_fetch(job_id):
         async for msg in client.iter_messages(BOT, limit=10):
             if msg.date < check_after:
                 break
-            if _is_flac(msg):
-                flac_msg = msg
-                break
+            if not _is_flac(msg):
+                continue
+            # Keep scanning past a FLAC that isn't ours rather than breaking on
+            # the first one: the stale reply sits *above* the real one, so
+            # stopping here would hand back the previous job's track.
+            if not matches_expected(msg, expect):
+                # Logged once per message, not once per scan — the stale reply
+                # is re-seen every cycle until the real one lands above it.
+                if msg.id not in rejected_ids:
+                    rejected_ids.add(msg.id)
+                    print(
+                        f"[{job_id}] ignoring a FLAC that is not the requested track: "
+                        f"got {doc_text(msg)!r}, wanted {expect.get('title')!r}",
+                        flush=True,
+                    )
+                continue
+            flac_msg = msg
+            break
         if flac_msg:
             break
 
@@ -413,7 +437,18 @@ async def _process_fetch(job_id):
     if flac_msg is None or flac_msg.document is None:
         with jobs_lock:
             job["state"] = "failed"
-            job["error"] = "timed out waiting for @deezload2bot to deliver a FLAC"
+            job["mismatched"] = len(rejected_ids)
+            if rejected_ids:
+                # Distinguishable on purpose: "the bot answered, with the wrong
+                # track" is a different problem from "the bot never answered",
+                # and before this check the first was indistinguishable from
+                # success.
+                job["error"] = (
+                    f"@deezload2bot delivered {len(rejected_ids)} FLAC(s), none matching "
+                    f"{expect.get('title')!r}"
+                )
+            else:
+                job["error"] = "timed out waiting for @deezload2bot to deliver a FLAC"
         return
 
     filename = "track.flac"
@@ -589,7 +624,13 @@ def fetch():
     if not _await(client.is_user_authorized(), timeout=15):
         return jsonify({"error": "not logged in — open /login"}), 401
 
-    job_id = _new_job(url)
+    # Optional, and old callers that omit it keep the previous behaviour: with
+    # no expectation every FLAC is accepted, exactly as before.
+    expect = {
+        "title": (body.get("title") or "").strip(),
+        "artist": (body.get("artist") or "").strip(),
+    }
+    job_id = _new_job(url, expect)
     _await(_fetch_queue.put(job_id))
     return jsonify({"job_id": job_id, "state": "queued"})
 

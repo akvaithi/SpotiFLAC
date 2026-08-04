@@ -51,6 +51,8 @@ Toolchain: Go (via brew), no cgo needed.
 export PATH="/opt/homebrew/bin:$PATH"
 CGO_ENABLED=0 go build -o /tmp/sf .        # pure-Go: taglib runs as WASM/wazero
 CGO_ENABLED=0 go vet ./...
+CGO_ENABLED=0 go test ./...                # matching, dedup keys, the search3 handler
+(cd flacit-gateway && python3 test_matching.py)   # stdlib only, no Flask/Telethon
 # smoke test: run with a temp config + downloads dir, hit /api/rpc/...
 CONFIG_DIR=/tmp/cfg /tmp/sf --addr :8890 --downloads /tmp/dl
 curl -s -X POST localhost:8890/api/rpc/GetDownloadProgress -d '[]'
@@ -185,8 +187,14 @@ IP gotcha below) — recreating containers silently invalidates it.
   from `DownloadTrack`, so it stays current without a rescan (writes are debounced
   5s). `MatchLibrary(items)` flags tracks already present (ISRC exact, else
   **loose title bucket + artist-set overlap**). UI unchecks in-library tracks on
-  album/playlist fetch. Note: Spotify album/playlist track metadata usually lacks
-  ISRC at match time, so matching is effectively name-based.
+  album/playlist fetch. Spotify's search and album/playlist responses don't carry
+  ISRC (checked — the `searchDesktop` persisted query has no `external_ids`), so
+  the ISRC branch was dead in practice; callers now pass `spotify_id` and
+  `MatchLibrary` recovers an ISRC from **`backend.GetCachedISRCsOnly`**, one bolt
+  read for the whole batch. Cache-only, never a fetch: this runs inside the
+  facade's search budget, and a miss just falls through to the name test. The
+  cache is filled by every download and link resolution, so anything acquired
+  through SpotiFLAC matches exactly from then on.
   The name test is `titleKey` + `creditsMatch`/`artistsOverlap` (`library.go`),
   **not** a `title|firstArtist` key — that key was replaced 2026-08-04 because it
   required both sides to bill the same artist first. SpotiFLAC tags credits with
@@ -203,7 +211,13 @@ IP gotcha below) — recreating containers silently invalidates it.
   files by ISRC **and** by a *strict* name key (`normStrStrict` keeps
   parentheticals, so "Song (Live)" never merges with the studio take — the
   `titleKey`/`artistsOverlap` pair stays loose for download-time matching, and
-  dedup deliberately does not use it). Best copy per group = lossless >
+  dedup deliberately does not use it). `strictKey`'s artist half is
+  `artistSetKey` — the **full artist set, sorted**, so "Kavinsky • Angèle" and
+  "Angèle, Kavinsky" group (it was `firstArtist`, which required both files to
+  agree on billing order *and* separator). Set equality, **not** the overlap used
+  for matching: overlap would merge "Nightcall — Kavinsky" with "Nightcall —
+  Kavinsky • Angèle • Phoenix", which are different recordings, and dedup acts on
+  its groups by moving files to the trash. Best copy per group = lossless >
   lossy, then largest, then oldest; the rest are suggested for removal.
   `CleanupDuplicates({paths, mode})` defaults to `trash` (move into
   `<library>/.spotiflac-trash/<timestamp>/`, `rename` with copy+remove fallback
@@ -237,6 +251,10 @@ IP gotcha below) — recreating containers silently invalidates it.
     already answered well seems clever and produced "works on my phone, not my
     desktop": the real variable was the query, and owning some of an artist is the
     most ordinary reason to want the rest.
+  - **Rank injected rows, never filter them.** `queryRelevance` puts literal title
+    matches above ones that share a word ("Vaathi Raid" for "Vaa Vaathi"), so the
+    ten-row cap isn't spent on neighbours. It looks only at the query — anything
+    that keys off how well the library answered repeats the adaptive-budget bug.
   - **An in-flight row stays visible** as `⏳` rather than being suppressed —
     otherwise a track is in neither list for the ~2 minutes before Navidrome
     indexes it, and reads as lost.
@@ -245,9 +263,15 @@ IP gotcha below) — recreating containers silently invalidates it.
     a record, so "already owned" and "found after download" can't disagree. Do not
     "fix" `firstArtist` — it still feeds duplicate detection, where collapsing an
     artist list would offer to delete real music.
-  - **Known gap:** the gateway checks a returned document *is* a FLAC, never that
-    it's the one requested, so a duplicate reply can in principle be attributed to
-    the next job. Retuning the resend made it unlikely, not impossible.
+  - **Closed 2026-08-04 (was a known gap):** the gateway checked a returned
+    document *is* a FLAC, never that it's the one requested, so a duplicate reply
+    could be attributed to the next job — the wrong music under the right name.
+    `/fetch` now takes the expected `title`/`artist` and `flacit-gateway/matching.py`
+    checks the reply's filename and audio tags, skipping a non-matching FLAC and
+    continuing to wait. It **fails open** where it can't judge (no expectation
+    sent, or a non-Latin filename that normalises to nothing) — rejecting a
+    correct file breaks a download that used to work, which is worse than the
+    slow path. `FLAC_MATCH_STRICT=0` disables it.
 - **Gateway URL must not be a container IP**: both containers run
   `network_mode: bridge` (the default docker0 bridge), so container IPs shift on
   every recreate and container-name DNS doesn't resolve. Use
