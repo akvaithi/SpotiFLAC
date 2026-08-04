@@ -22,6 +22,7 @@ GET    /fetch/<job_id>      -> {"state": resolving|downloading|ready|failed,
                                  "mismatched", "error"}
 GET    /fetch/<job_id>/file -> streams the finished FLAC
 DELETE /fetch/<job_id>      -> drops the temp file
+POST   /bot/command         {"command": "/help"} -> {"command", "reply"}
 ```
 
 A job API rather than one blocking request: bot delivery genuinely takes tens of
@@ -44,6 +45,15 @@ rejections, and the failure message names them. `FLAC_MATCH_STRICT=0` restores
 the old accept-anything behaviour.
 
 Tests: `python3 test_matching.py` (stdlib only, no Flask or Telethon needed).
+
+`/bot/command` reads the bot's own menu — `/help`, `/info`, `/follow`,
+`/privacy`, `/settings` — which is the only documentation it has, and the way to
+answer "what links does it actually accept?" without guessing. Allowlisted
+rather than free text: this shares one stateful conversation with the fetch
+worker, so an arbitrary-send primitive would be both a footgun and a way to
+start downloads outside the job API. It refuses with 409 while a fetch is in
+flight, because the reply matcher expects the next inbound message to be a
+document.
 
 ## Run it (Docker Compose)
 

@@ -673,6 +673,62 @@ def fetch_delete(job_id):
     return jsonify({"ok": True})
 
 
+# The bot's own menu, which is the only documentation it has. Reading it is how
+# you answer "what links does it actually accept?" without guessing — the
+# question that came up when a resolver sent an artist page and the fetch simply
+# timed out.
+#
+# An allowlist rather than a free-text send: this shares one stateful
+# conversation with the fetch worker, and a general "message the bot" primitive
+# would be both a footgun and a way to trigger downloads outside the job API.
+# Every command here is read-only in effect.
+BOT_COMMANDS = ("/help", "/info", "/follow", "/privacy", "/settings")
+
+
+async def _ask_bot(command, timeout=25):
+    sent_at = datetime.now(timezone.utc)
+    await client.send_message(BOT, command)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        _bot_activity.clear()
+        replies = []
+        async for msg in client.iter_messages(BOT, limit=10):
+            if msg.date < sent_at - timedelta(seconds=2):
+                break
+            if getattr(msg, "out", False):
+                continue  # our own command echoing back
+            if msg.message:
+                replies.append(msg.message)
+        if replies:
+            return "\n\n".join(reversed(replies))
+        try:
+            await asyncio.wait_for(_bot_activity.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+    return ""
+
+
+@app.route("/bot/command", methods=["POST"])
+def bot_command():
+    body = request.get_json(silent=True) or {}
+    command = (body.get("command") or "").strip().lower()
+    if command not in BOT_COMMANDS:
+        return jsonify({"error": f"command not allowed: {command!r}", "allowed": list(BOT_COMMANDS)}), 400
+    if not _await(client.is_user_authorized(), timeout=15):
+        return jsonify({"error": "not logged in — open /login"}), 401
+    # The reply matcher keys off "a new inbound message after the send", so a
+    # command mid-fetch would put a text message where a document is expected.
+    if _active_job_id is not None:
+        return jsonify({"error": "a fetch is in progress; try again when idle"}), 409
+
+    try:
+        reply = _await(_ask_bot(command), timeout=40)
+    except Exception as e:  # noqa
+        return jsonify({"error": f"asking the bot failed: {e}"}), 502
+    return jsonify({"command": command, "reply": reply})
+
+
 @app.route("/")
 def health():
     try:
