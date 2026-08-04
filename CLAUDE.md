@@ -167,6 +167,25 @@ IP gotcha below) — recreating containers silently invalidates it.
   hash to rot. **`GetArtistMembers`** hits MusicBrainz `artist-rels`; it must dedupe,
   since MusicBrainz emits one relation per instrument (a 4-instrument member
   otherwise appears 4×).
+- **What `@deezload2bot` actually accepts** (read from its own `/help`, v0.7.11,
+  2026-08-04 — `POST /bot/command {"command":"/help"}` on the gateway re-reads it):
+  *"Search by album or track, or just send me a Deezer or Spotify link."* So a
+  **Spotify link is a valid fallback**, which is what `resolveTrackURL` falls back
+  to. An **artist or album page is not** — the bot ignores it and the fetch waits
+  out its whole timeout, which is exactly how a resolver returning
+  `deezer.com/us/artist/491` cost three 270s retries. The free-text search is real
+  but stays **out of bounds** (see Boundaries): a wrong inline match files a remix
+  or live cut under the right track's name. `/follow` (artist subscriptions) is
+  untouched by any of this — verified empty after the artist links were sent.
+- **A non-track Deezer link must never reach the bot**: `normalizeDeezerTrackURL`
+  returns **empty** for anything that isn't `/track/`, and empty means "no Deezer
+  link". It used to return its input unchanged, which laundered an artist page
+  into something every caller treated as a track — and worse, suppressed the ISRC
+  fallback that would have resolved it, because a Deezer URL had "already been
+  found". Songstats and song.link's platform list both list artist/album entries
+  under the same platform, so both filter for a track link; `resolveTrackURL`
+  checks once more before the bot sees it; and the gateway 400s a non-track Deezer
+  URL so a bad link costs a second rather than `FLAC_TIMEOUT` × 3 retries.
 - **Deezer link resolution** (`backend/flacit.go` `resolveTrackURL`): prefers a
   Deezer track URL over the bare Spotify one, via the existing
   `SongLinkClient.GetDeezerURLFromSpotify` — it already chains song.link's Deezer
