@@ -120,9 +120,17 @@ func assignSongstatsLink(rawLink string, links *resolvedTrackLinks) {
 			}
 		}
 	case strings.Contains(link, "deezer.com"):
+		// Songstats lists an artist page under the same platform as the track —
+		// `deezer.com/us/artist/491` was accepted here as if it were a track and
+		// sent to the bot, which is why "Chinna Chinna Asai" downloaded nothing.
+		// normalizeDeezerTrackURL returns empty for anything that isn't a track.
 		if links.DeezerURL == "" {
-			links.DeezerURL = normalizeDeezerTrackURL(link)
-			fmt.Println("Deezer URL found via Songstats")
+			if normalized := normalizeDeezerTrackURL(link); normalized != "" {
+				links.DeezerURL = normalized
+				fmt.Println("Deezer URL found via Songstats")
+			} else {
+				fmt.Printf("Songstats returned a non-track Deezer link, ignoring: %s\n", link)
+			}
 		}
 	}
 }

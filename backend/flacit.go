@@ -330,7 +330,15 @@ func PrewarmDeezerURL(spotifyID string) {
 // API as internal fallbacks, so there's nothing left to retry here.
 func (f *FlacItDownloader) resolveTrackURL(spotifyID string) string {
 	if url := ResolveDeezerURL(spotifyID); url != "" {
-		return url
+		// Last check before the bot sees it. A resolver that answers with an
+		// artist or album page produces a link the bot cannot act on, and the
+		// only symptom is a fetch that waits out its whole timeout and retries —
+		// so the Spotify link, which the bot does understand, is strictly better
+		// than a Deezer link to the wrong kind of thing.
+		if isDeezerTrackURL(url) {
+			return url
+		}
+		fmt.Printf("Resolver returned a non-track Deezer link (%s); using the Spotify link instead\n", url)
 	}
 	return "https://open.spotify.com/track/" + spotifyID
 }

@@ -621,6 +621,11 @@ def fetch():
     url = (body.get("url") or "").strip()
     if not url:
         return jsonify({"error": "missing url"}), 400
+    # A Deezer link that isn't a track — an artist or album page — is something
+    # the bot cannot act on, and accepting it costs FLAC_TIMEOUT of silence
+    # followed by the caller's retries. Fail it in a second instead.
+    if "deezer.com" in url.lower() and "/track/" not in url:
+        return jsonify({"error": f"not a Deezer track link: {url}"}), 400
     if not _await(client.is_user_authorized(), timeout=15):
         return jsonify({"error": "not logged in — open /login"}), 401
 

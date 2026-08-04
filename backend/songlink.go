@@ -89,9 +89,14 @@ func (s *SongLinkClient) GetAllURLsFromSpotify(spotifyTrackID string, region str
 func (s *SongLinkClient) GetDeezerURLFromSpotify(spotifyTrackID string) (string, error) {
 	links, err := s.resolveSpotifyTrackLinks(spotifyTrackID, "")
 	if links != nil && links.DeezerURL != "" {
-		deezerURL := normalizeDeezerTrackURL(links.DeezerURL)
-		fmt.Printf("Found Deezer URL: %s\n", deezerURL)
-		return deezerURL, nil
+		// An unusable link must not short-circuit the ISRC path below — that
+		// fallback is exactly what rescues a track whose resolver answered with
+		// an artist or album page.
+		if deezerURL := normalizeDeezerTrackURL(links.DeezerURL); deezerURL != "" {
+			fmt.Printf("Found Deezer URL: %s\n", deezerURL)
+			return deezerURL, nil
+		}
+		fmt.Printf("Ignoring non-track Deezer link %q; falling back to ISRC\n", links.DeezerURL)
 	}
 
 	isrc := ""
@@ -259,7 +264,9 @@ func (s *SongLinkClient) scrapeSongLinkPage(pageURL string, region string) (*son
 					result.AmazonURL = rawURL
 				}
 			case "deezer":
-				if result.DeezerURL == "" {
+				// Only a track link; song.link lists artist and album entries
+				// under the same platform.
+				if result.DeezerURL == "" && isDeezerTrackURL(rawURL) {
 					result.DeezerURL = rawURL
 				}
 			}
@@ -297,11 +304,17 @@ func (s *SongLinkClient) lookupDeezerTrackURLByISRC(isrc string) (string, error)
 		return "", fmt.Errorf("failed to decode Deezer ISRC response: %w", err)
 	}
 
+	// normalizeDeezerTrackURL returns empty for anything that isn't a track, and
+	// an empty URL with a nil error would read as success to every caller.
 	if payload.Link != "" {
-		return normalizeDeezerTrackURL(payload.Link), nil
+		if normalized := normalizeDeezerTrackURL(payload.Link); normalized != "" {
+			return normalized, nil
+		}
 	}
 	if payload.ID > 0 {
-		return normalizeDeezerTrackURL(fmt.Sprintf("https://www.deezer.com/track/%d", payload.ID)), nil
+		if normalized := normalizeDeezerTrackURL(fmt.Sprintf("https://www.deezer.com/track/%d", payload.ID)); normalized != "" {
+			return normalized, nil
+		}
 	}
 
 	return "", fmt.Errorf("deezer track link not found for ISRC %s", isrc)
@@ -325,8 +338,10 @@ func mergeSongLinkScrape(links *resolvedTrackLinks, data *songLinkScrapeResult) 
 	}
 
 	if data.DeezerURL != "" && links.DeezerURL == "" {
-		links.DeezerURL = normalizeDeezerTrackURL(data.DeezerURL)
-		fmt.Println("Deezer URL found")
+		if normalized := normalizeDeezerTrackURL(data.DeezerURL); normalized != "" {
+			links.DeezerURL = normalized
+			fmt.Println("Deezer URL found")
+		}
 	}
 
 	if links.ISRC == "" && data.ISRC != "" {
@@ -361,12 +376,33 @@ func normalizeAmazonMusicURL(rawURL string) string {
 	return ""
 }
 
+// normalizeDeezerTrackURL returns the canonical track URL, or **empty** if the
+// input isn't a track link at all.
+//
+// It used to return the input unchanged on failure, which quietly laundered
+// anything Deezer-shaped into something the caller treated as a track. A
+// resolver handed back `deezer.com/us/artist/491` (A.R. Rahman's artist page)
+// for "Chinna Chinna Asai"; it was accepted, sent to the bot as if it were a
+// track, and the download never arrived — while the ISRC fallback that would
+// have resolved it correctly was skipped, because a Deezer URL had "already
+// been found". Callers must treat empty as "no Deezer link".
 func normalizeDeezerTrackURL(rawURL string) string {
 	trackID, err := extractDeezerTrackID(rawURL)
 	if err != nil {
-		return strings.TrimSpace(rawURL)
+		return ""
 	}
 	return fmt.Sprintf("https://www.deezer.com/track/%s", trackID)
+}
+
+// isDeezerTrackURL reports whether a URL names a Deezer *track*. Used as the
+// last check before a link is handed to the bot, which cannot do anything with
+// an artist, album or playlist page.
+func isDeezerTrackURL(rawURL string) bool {
+	if !strings.Contains(strings.ToLower(rawURL), "deezer.com") {
+		return false
+	}
+	_, err := extractDeezerTrackID(rawURL)
+	return err == nil
 }
 
 func extractDeezerTrackID(rawURL string) (string, error) {
