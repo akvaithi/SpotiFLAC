@@ -46,6 +46,7 @@ type QueueRecord struct {
 	ArtistName string `json:"artist_name,omitempty"`
 	AlbumName  string `json:"album_name,omitempty"`
 	SpotifyID  string `json:"spotify_id,omitempty"`
+	DeezerID   string `json:"deezer_id,omitempty"`
 	CoverURL   string `json:"cover_url,omitempty"`
 
 	EnqueuedAt    int64 `json:"enqueued_at"`

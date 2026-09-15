@@ -51,6 +51,16 @@ const (
 	// scheme keeps resolving instead of turning into a broken tile.
 	legacyCoverPrefix = "sf-cover:"
 
+	// Deezer-sourced rows. A separate namespace rather than reusing "sf:"
+	// because the id means something different — the catalog it indexes into —
+	// and a client's cache will hold both for a long time after the switch.
+	//
+	// Same colon rule as above: the song id may carry one (all three clients
+	// round-trip it intact), the cover id may not, because Arpeggi splits the
+	// coverArt attribute on ":" and requests the bare remainder.
+	deezerIDPrefix    = "sf-dz:"
+	deezerCoverPrefix = "sf-dzcover-"
+
 	// Spotify's contribution is capped: search results are a list someone is
 	// scanning, and a wall of unownable rows under the real ones is worse than
 	// a short one.
@@ -91,7 +101,7 @@ type subsonicFacade struct {
 	mu sync.Mutex
 	// spotifyID -> the search hit it came from, so getCoverArt and the
 	// enqueue both cost no second round trip. Bounded; oldest evicted first.
-	seen      map[string]backend.SearchResult
+	seen      map[string]catalogTrack
 	seenOrder []string
 	// spotifyID -> what to do once the track is really in the library.
 	pending map[string]*pendingAcquisition
@@ -101,7 +111,7 @@ type subsonicFacade struct {
 }
 
 type cachedSearch struct {
-	tracks []backend.SearchResult
+	tracks []catalogTrack
 	at     time.Time
 }
 
@@ -114,7 +124,7 @@ type cachedSearch struct {
 // documented fallback anyway (SUBSONIC-FACADE.md §5.3) — not worth a bolt
 // bucket and a migration.
 type pendingAcquisition struct {
-	SpotifyID string
+	RowID     string // prefixed, so the catalog it came from survives
 	Title     string
 	Artist    string
 	Star      bool
@@ -145,7 +155,7 @@ func initSubsonicFacade(app *App) *subsonicFacade {
 		client:      &http.Client{Timeout: 20 * time.Second},
 		inject:      envOr("SUBSONIC_FACADE", "") == "inject",
 		debug:       envOr("SUBSONIC_FACADE_DEBUG", "") != "",
-		seen:        map[string]backend.SearchResult{},
+		seen:        map[string]catalogTrack{},
 		pending:     map[string]*pendingAcquisition{},
 		searchCache: map[string]cachedSearch{},
 	}
@@ -291,18 +301,24 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	// background even if this request gives up waiting, so the next search for
 	// the same words is instant.
 	cached, hit := f.cachedSearch(query)
-	spotifyCh := make(chan []backend.SearchResult, 1)
+	catalogCh := make(chan []catalogTrack, 1)
 	if !hit {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), spotifySearchBudget)
 			defer cancel()
-			resp, err := backend.SearchSpotify(ctx, query, maxInjectedSongs*3)
-			if err != nil || resp == nil {
-				spotifyCh <- nil
+			tracks, err := searchCatalog(ctx, query, maxInjectedSongs*3)
+			if err != nil {
+				// Including ErrDeezerSearchUnavailable: a withheld answer is not
+				// an empty catalog, and injecting nothing is the right response
+				// to both — but only this one gets logged as a problem.
+				if err == backend.ErrDeezerSearchUnavailable {
+					log.Printf("subsonic facade: %v", err)
+				}
+				catalogCh <- nil
 				return
 			}
-			f.cacheSearch(query, resp.Tracks)
-			spotifyCh <- resp.Tracks
+			f.cacheSearch(query, tracks)
+			catalogCh <- tracks
 		}()
 	}
 
@@ -357,7 +373,7 @@ func (f *subsonicFacade) handleSearch3(w http.ResponseWriter, r *http.Request) {
 	tracks := cached
 	if !hit {
 		select {
-		case tracks = <-spotifyCh:
+		case tracks = <-catalogCh:
 		case <-time.After(spotifySearchBudget):
 		}
 	}
@@ -405,16 +421,95 @@ func positiveOffset(raw string) bool {
 	return err == nil && n > 0
 }
 
+// catalogTrack is a row from whichever catalog produced it. Deezer is the
+// source of new rows; Spotify rows still arrive from clients' caches and from
+// pasted links, and both have to reach the same acquisition path.
+//
+// Keyed on the *prefixed* row id everywhere, not the bare catalog id: the same
+// number can exist in both catalogs, and the prefix is what says which one a
+// cached client row meant.
+type catalogTrack struct {
+	Source   string // catalogDeezer | catalogSpotify
+	ID       string // id within that catalog
+	Title    string
+	Artists  string
+	Album    string
+	CoverURL string
+	Duration int // seconds
+	ISRC     string
+}
+
+const (
+	catalogDeezer  = "deezer"
+	catalogSpotify = "spotify"
+)
+
+func catalogFromDeezer(t backend.DeezerTrack) catalogTrack {
+	return catalogTrack{
+		Source: catalogDeezer,
+		ID:     strconv.FormatInt(t.ID, 10),
+		Title:  t.FullTitle(),
+		// The full credit, performer first — Deezer bills the composer as
+		// `artist`, which is the wrong name for both matching and lyrics.
+		Artists:  t.CreditedArtists(" • "),
+		Album:    t.Album.Title,
+		CoverURL: t.CoverURL(),
+		Duration: t.Duration,
+		ISRC:     t.ISRC,
+	}
+}
+
+func catalogFromSpotify(t backend.SearchResult) catalogTrack {
+	return catalogTrack{
+		Source:   catalogSpotify,
+		ID:       t.ID,
+		Title:    t.Name,
+		Artists:  t.Artists,
+		Album:    t.AlbumName,
+		CoverURL: t.Images,
+		Duration: t.Duration / 1000,
+	}
+}
+
+// rowID is the id a client sees, and the key for everything server-side.
+func (c catalogTrack) rowID() string {
+	if c.Source == catalogDeezer {
+		return deezerIDPrefix + c.ID
+	}
+	return virtualIDPrefix + c.ID
+}
+
+func (c catalogTrack) coverID() string {
+	if c.Source == catalogDeezer {
+		return deezerCoverPrefix + c.ID
+	}
+	return virtualCoverPrefix + c.ID
+}
+
+// parseRowID splits a client-supplied id back into catalog and id. Both
+// namespaces are accepted forever — a virtual id sitting in a client's cache
+// that the server can no longer resolve is a permanently broken row.
+func parseRowID(id string) (source, catalogID string, ok bool) {
+	switch {
+	case strings.HasPrefix(id, deezerIDPrefix):
+		return catalogDeezer, strings.TrimPrefix(id, deezerIDPrefix), true
+	case strings.HasPrefix(id, virtualIDPrefix):
+		return catalogSpotify, strings.TrimPrefix(id, virtualIDPrefix), true
+	}
+	return "", "", false
+}
+
 // virtualSong is the one description of an acquirable row. It exists so the
 // JSON and XML renderings cannot drift apart — the earlier version built a
 // map inline, which would have meant maintaining the field list twice.
 type virtualSong struct {
-	SpotifyID string
-	Title     string
-	Artist    string
-	Album     string
-	HasCover  bool
-	Duration  int // seconds
+	RowID    string
+	CoverID  string
+	Title    string
+	Artist   string
+	Album    string
+	HasCover bool
+	Duration int // seconds
 	// Pending means the download is queued or running: the row stays visible
 	// so an acquisition never looks lost, but reads as in progress.
 	Pending bool
@@ -430,7 +525,7 @@ func (v virtualSong) marker() string {
 
 func (v virtualSong) jsonMap() map[string]any {
 	m := map[string]any{
-		"id":     virtualIDPrefix + v.SpotifyID,
+		"id":     v.RowID,
 		"title":  v.marker() + v.Title,
 		"artist": v.Artist,
 		"album":  v.Album,
@@ -442,7 +537,7 @@ func (v virtualSong) jsonMap() map[string]any {
 		// whole response, taking the real results down with it.
 	}
 	if v.HasCover {
-		m["coverArt"] = virtualCoverPrefix + v.SpotifyID
+		m["coverArt"] = v.CoverID
 	}
 	if v.Duration > 0 {
 		m["duration"] = v.Duration
@@ -460,7 +555,7 @@ func (v virtualSong) xmlElement() string {
 		_ = xml.EscapeText(&b, []byte(value))
 		b.WriteString(`"`)
 	}
-	attr("id", virtualIDPrefix+v.SpotifyID)
+	attr("id", v.RowID)
 	attr("title", v.marker()+v.Title)
 	attr("artist", v.Artist)
 	attr("album", v.Album)
@@ -468,7 +563,7 @@ func (v virtualSong) xmlElement() string {
 	attr("type", "music")
 	attr("suffix", "flac")
 	if v.HasCover {
-		attr("coverArt", virtualCoverPrefix+v.SpotifyID)
+		attr("coverArt", v.CoverID)
 	}
 	if v.Duration > 0 {
 		attr("duration", strconv.Itoa(v.Duration))
@@ -477,9 +572,12 @@ func (v virtualSong) xmlElement() string {
 	return b.String()
 }
 
-// virtualSongs turns Spotify hits into acquirable rows, dropping anything
+// virtualSongs turns catalog hits into acquirable rows, dropping anything
 // already owned or already on its way.
-func (f *subsonicFacade) virtualSongs(query string, tracks []backend.SearchResult, owned ownedSet) []virtualSong {
+//
+// Source-agnostic: Deezer supplies new rows, but a Spotify-sourced row still
+// arrives from a client's cache or a pasted link, and both take this path.
+func (f *subsonicFacade) virtualSongs(query string, tracks []catalogTrack, owned ownedSet) []virtualSong {
 	states := f.acquisitionStates()
 
 	// Two ownership signals, unioned. Navidrome's own results are the
@@ -490,24 +588,27 @@ func (f *subsonicFacade) virtualSongs(query string, tracks []backend.SearchResul
 	// suppressing it is worth one cheap extra check.
 	inputs := make([]LibMatchInput, 0, len(tracks))
 	for i, t := range tracks {
-		// The whole credit, not firstArtist: MatchLibrary compares artists as a
-		// set now, and trimming the list here would throw away the very names
-		// that let a differently-ordered credit match. The id comes along so it
-		// can try a cached ISRC first — search results never carry one.
-		inputs = append(inputs, LibMatchInput{Index: i, SpotifyID: t.ID, Title: t.Name, Artist: t.Artists})
+		// ISRC comes free on a Deezer hit, which makes the ownership test exact
+		// rather than a name comparison — the branch that used to be dead
+		// because Spotify search never carries one.
+		in := LibMatchInput{Index: i, ISRC: t.ISRC, Title: t.Title, Artist: t.Artists}
+		if t.Source == catalogSpotify {
+			in.SpotifyID = t.ID
+		}
+		inputs = append(inputs, in)
 	}
 	indexed := map[int]bool{}
 	for _, m := range f.app.MatchLibrary(inputs) {
 		indexed[m.Index] = m.InLibrary
 	}
 
-	eligible := make([]backend.SearchResult, 0, len(tracks))
+	eligible := make([]catalogTrack, 0, len(tracks))
 	pending := make(map[string]bool, len(tracks))
 	for i, t := range tracks {
-		if t.ID == "" || t.Name == "" {
+		if t.ID == "" || t.Title == "" {
 			continue
 		}
-		if indexed[i] || owned.has(t.Name, t.Artists) {
+		if indexed[i] || owned.has(t.Title, t.Artists) {
 			continue
 		}
 
@@ -518,16 +619,16 @@ func (f *subsonicFacade) virtualSongs(query string, tracks []backend.SearchResul
 		// the ~2 minutes between starring it and Navidrome indexing it: the
 		// placeholder was suppressed because it was queued, and the real track
 		// did not exist yet, so the track was in neither list and looked lost.
-		state := states[t.ID]
+		state := states[t.rowID()]
 		if state == backend.QueueCompleted {
 			continue
 		}
-		pending[t.ID] = state != ""
+		pending[t.rowID()] = state != ""
 		eligible = append(eligible, t)
 	}
 
 	// Order by how directly each hit answers what was typed, before the cap
-	// takes the top ten. Spotify's own relevance ranks a partial word match
+	// takes the top ten. Catalog relevance ranks a partial word match
 	// ("Vaathi Raid", "Vaaji Vaaji" for "Vaa Vaathi") alongside tracks actually
 	// called that, and the cap then spends its budget on them.
 	//
@@ -535,7 +636,7 @@ func (f *subsonicFacade) virtualSongs(query string, tracks []backend.SearchResul
 	// may depend on how well the library answered. That premise is what made
 	// acquisition rows silently vanish for well-covered searches once already.
 	sort.SliceStable(eligible, func(i, j int) bool {
-		return queryRelevance(query, eligible[i].Name) > queryRelevance(query, eligible[j].Name)
+		return queryRelevance(query, eligible[i].Title) > queryRelevance(query, eligible[j].Title)
 	})
 
 	out := make([]virtualSong, 0, maxInjectedSongs)
@@ -545,13 +646,14 @@ func (f *subsonicFacade) virtualSongs(query string, tracks []backend.SearchResul
 		}
 		f.remember(t)
 		out = append(out, virtualSong{
-			SpotifyID: t.ID,
-			Title:     t.Name,
-			Artist:    t.Artists,
-			Album:     t.AlbumName,
-			HasCover:  t.Images != "",
-			Duration:  t.Duration / 1000,
-			Pending:   pending[t.ID],
+			RowID:    t.rowID(),
+			CoverID:  t.coverID(),
+			Title:    t.Title,
+			Artist:   t.Artists,
+			Album:    t.Album,
+			HasCover: t.CoverURL != "",
+			Duration: t.Duration,
+			Pending:  pending[t.rowID()],
 		})
 	}
 	return out
@@ -701,9 +803,14 @@ func injectXMLSongs(body []byte, songs []virtualSong) ([]byte, bool) {
 	return nil, false
 }
 
-// acquisitionStates maps spotify id -> queue status for anything this facade
-// has already been asked to fetch, so search can tell the three cases apart:
+// acquisitionStates maps row id -> queue status for anything this facade has
+// already been asked to fetch, so search can tell the three cases apart:
 // already here, on its way, or never asked for.
+//
+// A record is indexed under whichever catalog ids it carries. Both, when it has
+// both: a track queued from a Spotify row before the switch must still read as
+// "on its way" when the same recording now appears as a Deezer row, or starring
+// it again would queue a second copy.
 func (f *subsonicFacade) acquisitionStates() map[string]string {
 	states := map[string]string{}
 	records, err := backend.GetQueueRecords()
@@ -714,7 +821,10 @@ func (f *subsonicFacade) acquisitionStates() map[string]string {
 		switch rec.Status {
 		case backend.QueueQueued, backend.QueueDownloading, backend.QueueCompleted:
 			if rec.SpotifyID != "" {
-				states[rec.SpotifyID] = rec.Status
+				states[virtualIDPrefix+rec.SpotifyID] = rec.Status
+			}
+			if rec.DeezerID != "" {
+				states[deezerIDPrefix+rec.DeezerID] = rec.Status
 			}
 		}
 	}
@@ -728,28 +838,30 @@ func (f *subsonicFacade) acquisitionStates() map[string]string {
 func (f *subsonicFacade) handleGetCoverArt(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 
-	spotifyID := ""
+	lookup := ""
 	switch {
+	case strings.HasPrefix(id, deezerCoverPrefix):
+		lookup = deezerIDPrefix + strings.TrimPrefix(id, deezerCoverPrefix)
 	case strings.HasPrefix(id, virtualCoverPrefix):
-		spotifyID = strings.TrimPrefix(id, virtualCoverPrefix)
+		lookup = virtualIDPrefix + strings.TrimPrefix(id, virtualCoverPrefix)
 	case strings.HasPrefix(id, legacyCoverPrefix):
-		spotifyID = strings.TrimPrefix(id, legacyCoverPrefix)
+		lookup = virtualIDPrefix + strings.TrimPrefix(id, legacyCoverPrefix)
 	default:
 		// Belt and braces for clients that mangle the id on the way out: a bare
 		// id we have seen in a catalog search is ours, whatever the client did
-		// to the prefix. Safe because this map only ever holds Spotify track
+		// to the prefix. Safe because this map only ever holds catalog track
 		// ids, so a real Navidrome cover id cannot be in it.
 		if _, known := f.recall(id); known {
-			spotifyID = id
+			lookup = id
 		}
 	}
 
-	if spotifyID == "" {
+	if lookup == "" {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
 
-	imageURL := f.coverURL(spotifyID)
+	imageURL := f.coverURL(lookup)
 	if imageURL == "" {
 		writeSubsonicError(w, 70, "Cover art not found")
 		return
@@ -773,7 +885,7 @@ func (f *subsonicFacade) handleGetCoverArt(w http.ResponseWriter, r *http.Reques
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, 8<<20))
 }
 
-func (f *subsonicFacade) cachedSearch(query string) ([]backend.SearchResult, bool) {
+func (f *subsonicFacade) cachedSearch(query string) ([]catalogTrack, bool) {
 	key := strings.ToLower(strings.TrimSpace(query))
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -784,7 +896,7 @@ func (f *subsonicFacade) cachedSearch(query string) ([]backend.SearchResult, boo
 	return entry.tracks, true
 }
 
-func (f *subsonicFacade) cacheSearch(query string, tracks []backend.SearchResult) {
+func (f *subsonicFacade) cacheSearch(query string, tracks []catalogTrack) {
 	key := strings.ToLower(strings.TrimSpace(query))
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -798,33 +910,73 @@ func (f *subsonicFacade) cacheSearch(query string, tracks []backend.SearchResult
 	}
 }
 
-func (f *subsonicFacade) remember(t backend.SearchResult) {
+// searchCatalog asks the source of truth for what can actually be downloaded.
+//
+// Deezer is the catalog now because it is also the source: a Spotify hit that
+// Deezer doesn't carry is a row the pipeline can never satisfy, and offering it
+// costs the user a queued track, three 270s bot timeouts and a failure. Asking
+// the catalog that feeds the bot means offered implies obtainable.
+//
+// Spotify is not consulted here at all. It remains the metadata source for
+// pasted links (backend.FindDeezerTrack translates those), and older Spotify
+// rows still resolve — but nothing new is offered from a catalog that cannot
+// deliver.
+func searchCatalog(ctx context.Context, query string, limit int) ([]catalogTrack, error) {
+	hits, err := backend.SearchDeezerTracks(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]catalogTrack, 0, len(hits))
+	for _, h := range hits {
+		// `readable` is Deezer saying this is not playable in this region, which
+		// means the bot cannot fetch it either.
+		if h.ID == 0 || !h.Readable {
+			continue
+		}
+		out = append(out, catalogFromDeezer(h))
+	}
+	return out, nil
+}
+
+func (f *subsonicFacade) remember(t catalogTrack) {
 	if t.ID == "" {
 		return
 	}
+	key := t.rowID()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.seen[t.ID]; ok {
+	if _, ok := f.seen[key]; ok {
 		return
 	}
-	f.seen[t.ID] = t
-	f.seenOrder = append(f.seenOrder, t.ID)
+	f.seen[key] = t
+	f.seenOrder = append(f.seenOrder, key)
 	for len(f.seenOrder) > 2000 {
 		delete(f.seen, f.seenOrder[0])
 		f.seenOrder = f.seenOrder[1:]
 	}
 }
 
-func (f *subsonicFacade) recall(spotifyID string) (backend.SearchResult, bool) {
+// recall looks a row up by its full id, and falls back to a bare catalog id for
+// clients that strip the prefix on the way out.
+func (f *subsonicFacade) recall(id string) (catalogTrack, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	t, ok := f.seen[spotifyID]
-	return t, ok
+	if t, ok := f.seen[id]; ok {
+		return t, true
+	}
+	// A bare id: try both namespaces before giving up.
+	if t, ok := f.seen[deezerIDPrefix+id]; ok {
+		return t, true
+	}
+	if t, ok := f.seen[virtualIDPrefix+id]; ok {
+		return t, true
+	}
+	return catalogTrack{}, false
 }
 
-func (f *subsonicFacade) coverURL(spotifyID string) string {
-	t, _ := f.recall(spotifyID)
-	return t.Images
+func (f *subsonicFacade) coverURL(id string) string {
+	t, _ := f.recall(id)
+	return t.CoverURL
 }
 
 // -----------------------------------------------------------------------------
@@ -932,19 +1084,18 @@ func createdPlaylistID(body []byte) string {
 
 func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
-	if !strings.HasPrefix(id, virtualIDPrefix) {
+	if _, _, ok := parseRowID(id); !ok {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
 
 	// Blocking until the file exists is the tempting version and it does not
-	// work: the client's transports time out at 30s while a download is 5–13s
-	// of bot latency plus transfer plus tagging. It would succeed often enough
-	// to look correct and fail often enough to be untrustworthy. Enqueue and
-	// say so instead.
-	spotifyID := strings.TrimPrefix(id, virtualIDPrefix)
-	if err := f.acquire(spotifyID, func(p *pendingAcquisition) { p.Star = true }); err != nil {
-		log.Printf("subsonic facade: could not enqueue %s: %v", spotifyID, err)
+	// work: the client's transports time out at 30s while a download is tens of
+	// seconds of bot latency plus transfer plus tagging. It would succeed often
+	// enough to look correct and fail often enough to be untrustworthy. Enqueue
+	// and say so instead.
+	if err := f.acquire(id, func(p *pendingAcquisition) { p.Star = true }); err != nil {
+		log.Printf("subsonic facade: could not enqueue %s: %v", id, err)
 	}
 	writeSubsonicError(w, 70, "Queued for download — it will appear in your library shortly")
 }
@@ -953,12 +1104,16 @@ func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 // Acquisition
 // -----------------------------------------------------------------------------
 
-// acquire enqueues a Spotify track if it isn't already on its way, and records
-// what should become true of it once it lands. Idempotent: a second star for
-// an id already queued only updates the promise.
-func (f *subsonicFacade) acquire(spotifyID string, note func(*pendingAcquisition)) error {
+// acquire enqueues a track if it isn't already on its way, and records what
+// should become true of it once it lands. Idempotent: a second star for an id
+// already queued only updates the promise.
+//
+// rowID carries its own catalog, so a Deezer row enqueues with an exact source
+// id — no link resolution at all — while a Spotify row from a client's cache
+// still resolves the old way.
+func (f *subsonicFacade) acquire(rowID string, note func(*pendingAcquisition)) error {
 	f.mu.Lock()
-	existing := f.pending[spotifyID]
+	existing := f.pending[rowID]
 	f.mu.Unlock()
 
 	if existing != nil {
@@ -970,34 +1125,33 @@ func (f *subsonicFacade) acquire(spotifyID string, note func(*pendingAcquisition
 		return nil
 	}
 
-	meta, err := f.trackMetadata(spotifyID)
+	meta, err := f.trackMetadata(rowID)
 	if err != nil {
 		return err
 	}
 
-	p := &pendingAcquisition{SpotifyID: spotifyID, Title: meta.Name, Artist: firstArtist(meta.Artists)}
+	p := &pendingAcquisition{RowID: rowID, Title: meta.Title, Artist: meta.Artists}
 	if note != nil {
 		note(p)
 	}
 
 	f.mu.Lock()
-	f.pending[spotifyID] = p
+	f.pending[rowID] = p
 	f.mu.Unlock()
 
 	// Already fetched or already fetching: the promise above is recorded, but
 	// there is nothing new to enqueue.
-	if f.acquisitionStates()[spotifyID] != "" {
+	if f.acquisitionStates()[rowID] != "" {
 		return nil
 	}
 
-	_, err = f.app.EnqueueDownloads([]DownloadRequest{{
+	req := DownloadRequest{
 		Service:    "flacit",
-		SpotifyID:  spotifyID,
-		Query:      "https://open.spotify.com/track/" + spotifyID,
-		TrackName:  meta.Name,
+		TrackName:  meta.Title,
 		ArtistName: meta.Artists,
-		AlbumName:  meta.AlbumName,
-		CoverURL:   meta.Images,
+		AlbumName:  meta.Album,
+		CoverURL:   meta.CoverURL,
+		ISRC:       meta.ISRC,
 		// Ask for lyrics and genre in the file itself. The web UI leaves these
 		// to a checkbox, but a track acquired from a phone has no follow-up
 		// step — nobody is going to run EnrichLibrary from a bus — and
@@ -1005,58 +1159,88 @@ func (f *subsonicFacade) acquire(spotifyID string, note func(*pendingAcquisition
 		// then serves them to every client at once.
 		EmbedLyrics: true,
 		EmbedGenre:  true,
-	}})
-	if err != nil {
+	}
+	if meta.Source == catalogDeezer {
+		req.DeezerID = meta.ID
+		req.Query = "https://www.deezer.com/track/" + meta.ID
+	} else {
+		req.SpotifyID = meta.ID
+		req.Query = "https://open.spotify.com/track/" + meta.ID
+	}
+
+	if _, err = f.app.EnqueueDownloads([]DownloadRequest{req}); err != nil {
 		f.mu.Lock()
-		delete(f.pending, spotifyID)
+		delete(f.pending, rowID)
 		f.mu.Unlock()
 	}
 	return err
 }
 
-func (f *subsonicFacade) cancelPending(spotifyID string) {
+func (f *subsonicFacade) cancelPending(rowID string) {
 	f.mu.Lock()
-	delete(f.pending, spotifyID)
+	delete(f.pending, rowID)
 	f.mu.Unlock()
 }
 
 // trackMetadata resolves the fields the downloader tags with. The normal path
-// is a cache hit — the user starred a row they just searched for — so the
-// fetch is only for a star on a row that outlived the cache (a restart, or a
+// is a cache hit — the user starred a row they just searched for — so a fetch
+// only happens for a star on a row that outlived the cache (a restart, or a
 // result the client had held on to).
-func (f *subsonicFacade) trackMetadata(spotifyID string) (backend.SearchResult, error) {
-	if t, ok := f.recall(spotifyID); ok {
+//
+// The fetch is per-catalog, and a Spotify row can still arrive years after the
+// switch from a client's cache, which is why that path stays.
+func (f *subsonicFacade) trackMetadata(rowID string) (catalogTrack, error) {
+	if t, ok := f.recall(rowID); ok {
 		return t, nil
+	}
+
+	source, catalogID, ok := parseRowID(rowID)
+	if !ok {
+		return catalogTrack{}, fmt.Errorf("unrecognised row id %q", rowID)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	raw, err := backend.GetFilteredSpotifyData(ctx, "https://open.spotify.com/track/"+spotifyID, false, 0, "", nil)
+	if source == catalogDeezer {
+		id, err := strconv.ParseInt(catalogID, 10, 64)
+		if err != nil {
+			return catalogTrack{}, fmt.Errorf("bad deezer id %q", catalogID)
+		}
+		track, err := backend.GetDeezerTrack(ctx, id)
+		if err != nil {
+			return catalogTrack{}, err
+		}
+		t := catalogFromDeezer(*track)
+		f.remember(t)
+		return t, nil
+	}
+
+	raw, err := backend.GetFilteredSpotifyData(ctx, "https://open.spotify.com/track/"+catalogID, false, 0, "", nil)
 	if err != nil {
-		return backend.SearchResult{}, err
+		return catalogTrack{}, err
 	}
 	payload, ok := raw.(backend.TrackResponse)
 	if !ok {
 		if ptr, isPtr := raw.(*backend.TrackResponse); isPtr && ptr != nil {
 			payload = *ptr
 		} else {
-			return backend.SearchResult{}, fmt.Errorf("unexpected metadata payload for %s", spotifyID)
+			return catalogTrack{}, fmt.Errorf("unexpected metadata payload for %s", catalogID)
 		}
 	}
+	if payload.Track.Name == "" {
+		return catalogTrack{}, fmt.Errorf("no metadata for %s", catalogID)
+	}
 
-	t := backend.SearchResult{
-		ID:        spotifyID,
+	t := catalogFromSpotify(backend.SearchResult{
+		ID:        catalogID,
 		Name:      payload.Track.Name,
 		Type:      "track",
 		Artists:   payload.Track.Artists,
 		AlbumName: payload.Track.AlbumName,
 		Images:    payload.Track.Images,
 		Duration:  payload.Track.DurationMS,
-	}
-	if t.Name == "" {
-		return backend.SearchResult{}, fmt.Errorf("no metadata for %s", spotifyID)
-	}
+	})
 	f.remember(t)
 	return t, nil
 }
@@ -1095,7 +1279,7 @@ func (f *subsonicFacade) reconcile() {
 		}
 		if songID == "" {
 			log.Printf("subsonic facade: %q never appeared in Navidrome, giving up on reconciliation", p.Title)
-			f.cancelPending(p.SpotifyID)
+			f.cancelPending(p.RowID)
 			continue
 		}
 
@@ -1110,7 +1294,7 @@ func (f *subsonicFacade) reconcile() {
 				log.Printf("subsonic facade: could not add %s to playlist %s: %v", songID, playlistID, err)
 			}
 		}
-		f.cancelPending(p.SpotifyID)
+		f.cancelPending(p.RowID)
 	}
 }
 
@@ -1169,10 +1353,13 @@ func songMatches(navTitle, navArtist, wantTitle, wantArtist string) bool {
 // Plumbing
 // -----------------------------------------------------------------------------
 
+// splitVirtual separates our placeholder ids from Navidrome's own. Virtual ids
+// are returned **with** their prefix: it names the catalog, and dropping it
+// would make a Deezer id indistinguishable from a Spotify one.
 func splitVirtual(ids []string) (virtual, real []string) {
 	for _, id := range ids {
-		if strings.HasPrefix(id, virtualIDPrefix) {
-			virtual = append(virtual, strings.TrimPrefix(id, virtualIDPrefix))
+		if _, _, ok := parseRowID(id); ok {
+			virtual = append(virtual, id)
 		} else if id != "" {
 			real = append(real, id)
 		}

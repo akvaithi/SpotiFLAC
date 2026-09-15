@@ -22,7 +22,8 @@ const xmlFailed = `<?xml version="1.0" encoding="UTF-8"?>` +
 
 func sample() []virtualSong {
 	return []virtualSong{{
-		SpotifyID: "abc123",
+		RowID:   deezerIDPrefix + "abc123",
+		CoverID: deezerCoverPrefix + "abc123",
 		// Deliberately nasty: the characters that break naive string building.
 		Title:    `Rock & "Roll" <b>`,
 		Artist:   "Kavinsky",
@@ -61,7 +62,7 @@ func TestInjectXMLPopulated(t *testing.T) {
 	if n := mustParse(t, out); n != 2 {
 		t.Errorf("expected 2 songs (1 real + 1 virtual), got %d", n)
 	}
-	if !strings.Contains(string(out), `id="sf:abc123"`) {
+	if !strings.Contains(string(out), `id="sf-dz:abc123"`) {
 		t.Error("virtual id missing")
 	}
 	// The real row must survive untouched, entity form and all.
@@ -133,8 +134,8 @@ func TestPositiveOffset(t *testing.T) {
 // indexing the file there is a ~2 minute window where the real track does not
 // exist yet; the placeholder has to stay, marked as in progress.
 func TestPendingRowStaysVisible(t *testing.T) {
-	pending := virtualSong{SpotifyID: "x", Title: "Hair Salon", Artist: "Megan Moroney", Pending: true}
-	fresh := virtualSong{SpotifyID: "y", Title: "Hair Salon", Artist: "Megan Moroney"}
+	pending := virtualSong{RowID: deezerIDPrefix + "x", Title: "Hair Salon", Artist: "Megan Moroney", Pending: true}
+	fresh := virtualSong{RowID: deezerIDPrefix + "y", Title: "Hair Salon", Artist: "Megan Moroney"}
 
 	if got := pending.jsonMap()["title"].(string); !strings.HasPrefix(got, "⏳") {
 		t.Errorf("pending row title = %q, want the in-progress marker", got)
@@ -150,15 +151,17 @@ func TestPendingRowStaysVisible(t *testing.T) {
 // Arpeggi splits the coverArt id on ":" and requests the bare remainder, so
 // the prefix must not contain one — and a mangled id must still resolve.
 func TestCoverPrefixHasNoColon(t *testing.T) {
-	if strings.Contains(virtualCoverPrefix, ":") {
-		t.Errorf("virtualCoverPrefix %q contains a colon; clients split on it", virtualCoverPrefix)
+	for _, prefix := range []string{virtualCoverPrefix, deezerCoverPrefix} {
+		if strings.Contains(prefix, ":") {
+			t.Errorf("cover prefix %q contains a colon; clients split on it", prefix)
+		}
 	}
-	v := virtualSong{SpotifyID: "abc123", Title: "T", HasCover: true}
+	v := virtualSong{RowID: deezerIDPrefix + "abc123", CoverID: deezerCoverPrefix + "abc123", Title: "T", HasCover: true}
 	got := v.jsonMap()["coverArt"].(string)
 	if strings.Contains(got, ":") {
 		t.Errorf("coverArt id %q contains a colon", got)
 	}
 	if !strings.HasSuffix(got, "abc123") {
-		t.Errorf("coverArt id %q lost the spotify id", got)
+		t.Errorf("coverArt id %q lost the catalog id", got)
 	}
 }

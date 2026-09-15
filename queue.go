@@ -278,6 +278,7 @@ type QueueItem struct {
 	ArtistName string  `json:"artist_name,omitempty"`
 	AlbumName  string  `json:"album_name,omitempty"`
 	SpotifyID  string  `json:"spotify_id,omitempty"`
+	DeezerID   string  `json:"deezer_id,omitempty"`
 	CoverURL   string  `json:"cover_url,omitempty"`
 	ProgressMB float64 `json:"progress_mb"`
 	TotalMB    float64 `json:"total_mb"`
@@ -309,6 +310,7 @@ func queueItemView(rec backend.QueueRecord) QueueItem {
 		ArtistName: rec.ArtistName,
 		AlbumName:  rec.AlbumName,
 		SpotifyID:  rec.SpotifyID,
+		DeezerID:   rec.DeezerID,
 		CoverURL:   rec.CoverURL,
 		EnqueuedAt: rec.EnqueuedAt,
 		StartedAt:  rec.StartedAt,
@@ -342,6 +344,7 @@ func (a *App) EnqueueDownloads(reqs []DownloadRequest) ([]string, error) {
 			ArtistName: req.ArtistName,
 			AlbumName:  req.AlbumName,
 			SpotifyID:  req.SpotifyID,
+			DeezerID:   req.DeezerID,
 			CoverURL:   req.CoverURL,
 		}
 		if err := backend.AppendQueueRecord(rec); err != nil {
@@ -354,7 +357,13 @@ func (a *App) EnqueueDownloads(reqs []DownloadRequest) ([]string, error) {
 		// here. The lookup is capped at 3 concurrent inside the backend, so a
 		// large batch queues up behind a serial worker that is several seconds
 		// per track — which is exactly enough for each link to be ready early.
-		backend.PrewarmDeezerURL(req.SpotifyID)
+		//
+		// Skipped entirely when the request already carries a Deezer id: there is
+		// nothing to guess, and prewarming would spend a song.link call to
+		// rediscover something the caller was told by Deezer itself.
+		if req.DeezerID == "" {
+			backend.PrewarmDeezerURL(req.SpotifyID)
+		}
 	}
 
 	if worker != nil {

@@ -20,10 +20,15 @@ import (
 // connections. The Tidal/Qobuz/Amazon engines this replaced are gone — no
 // fallback by design, see CLAUDE.md.
 type FlacItDownloader struct {
-	gatewayURL  string
-	client      *http.Client
-	SourceURL   string
-	SourceLabel string
+	gatewayURL string
+	client     *http.Client
+	// DeezerTrackID, when set, *is* the answer — the caller already knows which
+	// Deezer recording this is, so the whole song.link / Songstats / ISRC chain
+	// is skipped. That chain exists only to guess what a Deezer-sourced request
+	// already knows, and every guess is a chance to send the bot the wrong link.
+	DeezerTrackID string
+	SourceURL     string
+	SourceLabel   string
 }
 
 func NewFlacItDownloader(gatewayURL string) *FlacItDownloader {
@@ -337,6 +342,13 @@ func (f *FlacItDownloader) resolveTrackURL(spotifyID string) string {
 // on a Deezer link. The name and duration are only used there; callers without
 // them get exactly the old behaviour.
 func (f *FlacItDownloader) resolveTrackURLFor(spotifyID, trackName, artistName string, durationMS int) string {
+	// Known exactly: no resolution, no network, no ambiguity.
+	if id := strings.TrimSpace(f.DeezerTrackID); id != "" {
+		url := "https://www.deezer.com/track/" + id
+		fmt.Printf("Using the known Deezer track: %s\n", url)
+		return url
+	}
+
 	if url := ResolveDeezerURL(spotifyID); url != "" {
 		// Last check before the bot sees it. A resolver that answers with an
 		// artist or album page produces a link the bot cannot act on, and the

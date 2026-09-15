@@ -299,6 +299,10 @@ type DownloadRequest struct {
 	Position                   int    `json:"position,omitempty"`
 	UseAlbumTrackNumber        bool   `json:"use_album_track_number,omitempty"`
 	SpotifyID                  string `json:"spotify_id,omitempty"`
+	// DeezerID identifies the source recording exactly. Set by anything that
+	// found the track in Deezer's own catalog, and when present it replaces the
+	// entire link-resolution chain.
+	DeezerID string `json:"deezer_id,omitempty"`
 	EmbedLyrics                bool   `json:"embed_lyrics,omitempty"`
 	EmbedMaxQualityCover       bool   `json:"embed_max_quality_cover,omitempty"`
 	Duration                   int    `json:"duration,omitempty"`
@@ -743,6 +747,7 @@ func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 	}
 
 	downloader := backend.NewFlacItDownloader(backend.GetFlacItGatewayURL())
+	downloader.DeezerTrackID = req.DeezerID
 	filename, err = downloader.Download(req.SpotifyID, req.OutputDir, req.FilenameFormat, req.TrackNumber, req.Position, req.TrackName, req.ArtistName, req.AlbumName, req.AlbumArtist, req.ReleaseDate, req.UseAlbumTrackNumber, req.CoverURL, req.EmbedMaxQualityCover, req.SpotifyTrackNumber, req.SpotifyDiscNumber, req.SpotifyTotalTracks, req.SpotifyTotalDiscs, req.Copyright, req.Publisher, req.Composer, metadataSeparator, req.ISRC, spotifyURL, req.UseFirstArtistOnly, req.UseSingleGenre, req.EmbedGenre)
 	sourceURL = downloader.SourceURL
 	sourceLabel = downloader.SourceLabel

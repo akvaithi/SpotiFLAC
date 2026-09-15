@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/akvaithi/SpotiFLAC/backend"
 )
 
 // End-to-end cover for handleSearch3 against a stub Navidrome.
@@ -34,7 +32,7 @@ func stubNavidrome(t *testing.T, contentType, body string) *httptest.Server {
 // testFacade points a facade at the stub and pre-seeds the catalog cache, which
 // is the seam that keeps the test off the network: a cache hit means
 // handleSearch3 never calls Spotify.
-func testFacade(t *testing.T, upstream *httptest.Server, query string, tracks []backend.SearchResult) *subsonicFacade {
+func testFacade(t *testing.T, upstream *httptest.Server, query string, tracks []catalogTrack) *subsonicFacade {
 	t.Helper()
 	// Contain anything that reaches for the app dir (the ISRC and queue
 	// databases) inside the test's own directory.
@@ -50,12 +48,24 @@ func testFacade(t *testing.T, upstream *httptest.Server, query string, tracks []
 		proxy:       httputil.NewSingleHostReverseProxy(target),
 		client:      &http.Client{Timeout: 5 * time.Second},
 		inject:      true,
-		seen:        map[string]backend.SearchResult{},
+		seen:        map[string]catalogTrack{},
 		pending:     map[string]*pendingAcquisition{},
 		searchCache: map[string]cachedSearch{},
 	}
 	f.cacheSearch(query, tracks)
 	return f
+}
+
+// deezerTracks builds catalog fixtures the way search now produces them.
+func deezerTracks(specs ...[2]string) []catalogTrack {
+	out := make([]catalogTrack, 0, len(specs))
+	for _, sp := range specs {
+		title, artists, _ := strings.Cut(sp[1], "|")
+		out = append(out, catalogTrack{
+			Source: catalogDeezer, ID: sp[0], Title: title, Artists: artists,
+		})
+	}
+	return out
 }
 
 func search3Request(rawQuery string) *http.Request {
@@ -97,10 +107,10 @@ func decodeSongs(t *testing.T, body []byte) []map[string]any {
 func TestSearch3InjectsOnlyWhatIsMissing(t *testing.T) {
 	emptyLibrary(t)
 	upstream := stubNavidrome(t, "application/json", jsonOneOwnedSong)
-	f := testFacade(t, upstream, "vaa vaathi", []backend.SearchResult{
-		{ID: "owned", Name: "Vaa Vaathi", Artists: "Shweta Mohan, G. V. Prakash Kumar", AlbumName: "Vaathi"},
-		{ID: "new1", Name: "Vaa Vaathi (Flute)", Artists: "Flute Siva"},
-	})
+	f := testFacade(t, upstream, "vaa vaathi", deezerTracks(
+		[2]string{"owned", "Vaa Vaathi|Shweta Mohan, G. V. Prakash Kumar"},
+		[2]string{"new1", "Vaa Vaathi (Flute)|Flute Siva"},
+	))
 
 	w := httptest.NewRecorder()
 	f.handleSearch3(w, search3Request("query=vaa+vaathi&f=json"))
@@ -112,14 +122,14 @@ func TestSearch3InjectsOnlyWhatIsMissing(t *testing.T) {
 	if songs[0]["id"] != "real-1" {
 		t.Errorf("upstream row was not preserved first: %v", songs[0])
 	}
-	if songs[1]["id"] != virtualIDPrefix+"new1" {
+	if songs[1]["id"] != deezerIDPrefix+"new1" {
 		t.Errorf("expected the missing track injected, got %v", songs[1])
 	}
 	if title, _ := songs[1]["title"].(string); !strings.HasPrefix(title, "↓ ") {
 		t.Errorf("injected row is not marked acquirable: %q", title)
 	}
 	for _, s := range songs {
-		if s["id"] == virtualIDPrefix+"owned" {
+		if s["id"] == deezerIDPrefix+"owned" {
 			t.Error("offered a download for a track the library already has")
 		}
 	}
@@ -133,9 +143,7 @@ func TestSearch3InjectsIntoXML(t *testing.T) {
 		`<song id="real-1" title="Vaa Vaathi" artist="G. V. Prakash • Shweta Mohan"/>` +
 		`</searchResult3></subsonic-response>`
 	upstream := stubNavidrome(t, "application/xml", body)
-	f := testFacade(t, upstream, "vaa vaathi", []backend.SearchResult{
-		{ID: "new1", Name: "Vaa Vaathi (Flute)", Artists: "Flute Siva"},
-	})
+	f := testFacade(t, upstream, "vaa vaathi", deezerTracks([2]string{"new1", "Vaa Vaathi (Flute)|Flute Siva"}))
 
 	w := httptest.NewRecorder()
 	f.handleSearch3(w, search3Request("query=vaa+vaathi"))
@@ -144,7 +152,7 @@ func TestSearch3InjectsIntoXML(t *testing.T) {
 	if !strings.Contains(out, `id="real-1"`) {
 		t.Error("upstream row did not survive the splice")
 	}
-	if !strings.Contains(out, `id="sf:new1"`) {
+	if !strings.Contains(out, `id="sf-dz:new1"`) {
 		t.Errorf("no virtual row was spliced in:\n%s", out)
 	}
 	if !strings.HasPrefix(out, `<?xml`) {
@@ -194,9 +202,7 @@ func TestSearch3PassesThroughUnchanged(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			emptyLibrary(t)
 			upstream := stubNavidrome(t, c.contentType, c.body)
-			f := testFacade(t, upstream, "vaa vaathi", []backend.SearchResult{
-				{ID: "new1", Name: "Vaa Vaathi (Flute)", Artists: "Flute Siva"},
-			})
+			f := testFacade(t, upstream, "vaa vaathi", deezerTracks([2]string{"new1", "Vaa Vaathi (Flute)|Flute Siva"}))
 
 			w := httptest.NewRecorder()
 			f.handleSearch3(w, search3Request(c.rawQuery))
@@ -214,9 +220,7 @@ func TestSearch3PassesThroughUnchanged(t *testing.T) {
 func TestSearch3TreatsZeroOffsetAsFirstPage(t *testing.T) {
 	emptyLibrary(t)
 	upstream := stubNavidrome(t, "application/json", jsonOneOwnedSong)
-	f := testFacade(t, upstream, "vaa vaathi", []backend.SearchResult{
-		{ID: "new1", Name: "Vaa Vaathi (Flute)", Artists: "Flute Siva"},
-	})
+	f := testFacade(t, upstream, "vaa vaathi", deezerTracks([2]string{"new1", "Vaa Vaathi (Flute)|Flute Siva"}))
 
 	w := httptest.NewRecorder()
 	f.handleSearch3(w, search3Request("query=vaa+vaathi&f=json&songOffset=0"))
@@ -232,13 +236,13 @@ func TestSearch3RanksLiteralTitleMatchesFirst(t *testing.T) {
 	emptyLibrary(t)
 	upstream := stubNavidrome(t, "application/json",
 		`{"subsonic-response":{"status":"ok","searchResult3":{}}}`)
-	f := testFacade(t, upstream, "vaa vaathi", []backend.SearchResult{
-		// Spotify's own order: neighbours first, the literal match last.
-		{ID: "neighbour1", Name: "Vaathi Raid", Artists: "Anirudh Ravichander"},
-		{ID: "neighbour2", Name: "Vaaji Vaaji", Artists: "Hariharan"},
-		{ID: "exact", Name: "Vaa Vaathi", Artists: "Shamitha John"},
-		{ID: "qualified", Name: "Vaa Vaathi (Flute)", Artists: "Flute Siva"},
-	})
+	f := testFacade(t, upstream, "vaa vaathi", deezerTracks(
+		// The catalog's own order: neighbours first, the literal match last.
+		[2]string{"neighbour1", "Vaathi Raid|Anirudh Ravichander"},
+		[2]string{"neighbour2", "Vaaji Vaaji|Hariharan"},
+		[2]string{"exact", "Vaa Vaathi|Shamitha John"},
+		[2]string{"qualified", "Vaa Vaathi (Flute)|Flute Siva"},
+	))
 
 	w := httptest.NewRecorder()
 	f.handleSearch3(w, search3Request("query=vaa+vaathi&f=json"))
@@ -247,14 +251,14 @@ func TestSearch3RanksLiteralTitleMatchesFirst(t *testing.T) {
 	if len(songs) != 4 {
 		t.Fatalf("expected 4 injected rows, got %d", len(songs))
 	}
-	if songs[0]["id"] != virtualIDPrefix+"exact" {
+	if songs[0]["id"] != deezerIDPrefix+"exact" {
 		t.Errorf("exact title match did not rank first: %v", songs[0]["id"])
 	}
-	if songs[1]["id"] != virtualIDPrefix+"qualified" {
+	if songs[1]["id"] != deezerIDPrefix+"qualified" {
 		t.Errorf("qualified title match did not rank second: %v", songs[1]["id"])
 	}
 	// Spotify's relative order survives within a tier.
-	if songs[2]["id"] != virtualIDPrefix+"neighbour1" || songs[3]["id"] != virtualIDPrefix+"neighbour2" {
+	if songs[2]["id"] != deezerIDPrefix+"neighbour1" || songs[3]["id"] != deezerIDPrefix+"neighbour2" {
 		t.Errorf("upstream ordering was not stable within the tier: %v %v", songs[2]["id"], songs[3]["id"])
 	}
 }
