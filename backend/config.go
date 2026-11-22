@@ -94,7 +94,7 @@ func LoadConfigSettings() (map[string]interface{}, error) {
 
 // The browser source runs inside the existing Chromium container on a shared
 // Docker network. Keep legacy settings readable for existing callers.
-const defaultFlacItGatewayURL = "http://chromium:8082"
+const defaultFlacItGatewayURL = "http://chromium:8782"
 
 func GetFlacItGatewayURL() string {
 	if source := strings.TrimSpace(os.Getenv("DOUBLEDOUBLE_GATEWAY_URL")); source != "" {

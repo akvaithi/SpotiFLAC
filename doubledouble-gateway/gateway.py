@@ -330,4 +330,4 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     threading.Thread(target=worker, daemon=True).start()
-    ThreadingHTTPServer(('0.0.0.0', 8082), Handler).serve_forever()
+    ThreadingHTTPServer(('0.0.0.0', 8782), Handler).serve_forever()

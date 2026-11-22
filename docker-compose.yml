@@ -1,7 +1,7 @@
 name: spotiflac
 services:
   spotiflac:
-    image: ghcr.io/akvaithi/spotiflac:latest
+    image: ${SPOTIFLAC_IMAGE:-ghcr.io/akvaithi/spotiflac:latest}
     container_name: spotiflac
     user: "1000:1000"
     ports:
@@ -13,7 +13,7 @@ services:
       ADDR: :8080
       DOWNLOAD_DIR: /downloads
       CONFIG_DIR: /config
-      DOUBLEDOUBLE_GATEWAY_URL: http://chromium:8082
+      DOUBLEDOUBLE_GATEWAY_URL: http://chromium:8782
       SUBSONIC_FACADE: inject
       NAVIDROME_URL: http://navidrome:4533
       NAVIDROME_USER: ${NAVIDROME_USER:?Read the Navidrome account from Keychain}
