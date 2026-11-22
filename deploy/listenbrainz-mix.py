@@ -41,7 +41,7 @@ def resolve(track):
     title, artist = track.get("title", ""), track.get("creator", "")
     if not title or not artist:
         return None
-    search = f'artist:"{artist.replace(chr(34), "")}" track:"{title.replace(chr(34), "")}"'
+    search = f"{artist} {title}"
     data = get(DEEZER + "search?" + urlencode({"q": search, "limit": 12}))["data"]
 
     def exact(row):
@@ -125,6 +125,6 @@ def build():
 if __name__ == "__main__":
     try:
         build()
-    except (OSError, ValueError, KeyError) as error:
+    except (OSError, ValueError, KeyError, sqlite3.Error) as error:
         print(f"ListenBrainz refresh failed ({type(error).__name__}). Keeping the last mix.", file=sys.stderr)
         sys.exit(1)
