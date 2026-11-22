@@ -140,8 +140,11 @@ func TestPendingRowStaysVisible(t *testing.T) {
 	if got := pending.jsonMap()["title"].(string); !strings.HasPrefix(got, "⏳") {
 		t.Errorf("pending row title = %q, want the in-progress marker", got)
 	}
-	if got := fresh.jsonMap()["title"].(string); !strings.HasPrefix(got, "↓") {
-		t.Errorf("acquirable row title = %q, want the download marker", got)
+	if got := fresh.jsonMap()["title"]; got != fresh.Title {
+		t.Errorf("acquirable row title = %q, want %q", got, fresh.Title)
+	}
+	if !strings.Contains(fresh.xmlElement(), `title="Hair Salon"`) {
+		t.Errorf("XML rendering changed the catalog title: %s", fresh.xmlElement())
 	}
 	if !strings.Contains(pending.xmlElement(), "⏳") {
 		t.Error("XML rendering lost the pending marker")

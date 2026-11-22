@@ -11,7 +11,8 @@ injects Deezer catalog rows with the `sf-dz:` prefix. Older `sf:` Spotify IDs
 can still be played or acquired. DoubleDouble is the active download source.
 See [the source adapter guide](doubledouble-gateway/README.md) for the current
 deployment and source tests. The design below records the original rollout.
-Section 5.5 describes current playback.
+Section 5.5 describes current playback. Fresh results use the catalog title.
+An hourglass appears only while the acquisition is in progress.
 
 Injection is opt-in: `SUBSONIC_FACADE=inject`. Unset is a pure reverse proxy, which is
 what any new deployment should run first — if the pass-through is not invisible,
@@ -160,9 +161,8 @@ One limit remains, in the *injection* path only — pass-through is universal:
 - **GET only.** A client that submits `search3` over the `formPost` extension gets no
   injection, for the same reason: the parameters are in the body, not the URL. Star
   and playlist writes over POST *are* handled.
-- **Marker convention.** `↓` in the title is the only signal a client has that a row
-  is an acquisition. A client that renders titles verbatim shows it correctly; one
-  that does something clever with titles might not.
+- **Pending marker.** An hourglass in the title indicates an active acquisition.
+  Fresh search results use their original title.
 
 Navidrome's **own web UI is unaffected** either way — it talks to Navidrome's private
 `/api` endpoints, not `/rest`, so it never passes through the facade.
@@ -183,13 +183,12 @@ The `sf:` prefix is the *only* signal the facade needs. Any request carrying an 
 with that prefix is ours; any other id is Navidrome's and is forwarded verbatim.
 Navidrome ids are hex ULIDs and never collide with this shape.
 
-Virtual songs are marked in their **title**, not only structurally, because the user
-has to be able to tell at a glance that a row is an acquisition and not a play:
+Fresh virtual songs use their catalog title. For example
 
 ```json
 {
   "id": "sf:4cOdK2wGLETKBW3PvgPWqT",
-  "title": "↓ Nightcall",
+  "title": "Nightcall",
   "artist": "Kavinsky",
   "album": "OutRun",
   "coverArt": "sf-cover:4cOdK2wGLETKBW3PvgPWqT",
@@ -200,8 +199,6 @@ has to be able to tell at a glance that a row is an acquisition and not a play:
 }
 ```
 
-`↓` is chosen over "(not in library)" because Cassette truncates long titles in rows
-on iOS and a leading glyph survives truncation.
 
 ---
 
@@ -359,7 +356,7 @@ common — plus a prefix rule, so *G. V. Prakash* matches *G. V. Prakash Kumar*.
 artist first, or list the same number of singers.
 
 **Fixed 2026-08-04:** `MatchLibrary` had the same blind spot, and it was not harmless
-— §5.1's ownership filter offered a `↓` row for tracks the user already owned, on
+— §5.1's ownership filter offered a virtual row for tracks the user already owned, on
 essentially every multi-singer Indian film song (reported for *Vaa Vaathi*). Both the
 index and the in-result owned set now key on `titleKey` alone and confirm the artist
 with `creditsMatch`, the same overlap test. Two guards go with it: `titleKey` collapses
@@ -453,7 +450,7 @@ download started from the iPhone player has not been timed.
    facade → SearchSpotify              (concurrent, 1.5s budget)
    facade → ownership filter           (drop owned)
    ← song[] = [ …real… , "↓ Nightcall" (sf:4cOd…) ]
-3. User long-presses the ↓ row → Add to Favorites
+3. User long-presses the virtual row → Add to Favorites
 4. Cassette → star?id=sf:4cOd…
    Cassette also writes a local FavoriteRecord "song:sf:4cOd…" (see §5.3)
 5. facade: EnqueueDownloads([DownloadRequest{SpotifyID:"4cOd…", …}])
@@ -566,7 +563,7 @@ does not get:
 - **Spotify playlist and album *import*** — recoverable server-side and needing no
   client support: SpotiFLAC can create the playlist in Navidrome directly, add what
   it owns, and enqueue the rest. Worth doing as a separate piece of work.
-- **Ownership badges everywhere.** `↓` rows appear in search and nowhere else; there
+- **Ownership badges everywhere.** virtual rows appear in search and nowhere else; there
   is no "you own 8 of these 12 tracks" on an artist page.
 - **Library maintenance UI** — `EnrichLibrary`, `FindDuplicates`, trash. These stay
   in SpotiFLAC's web UI, reachable from any browser including the phone's.
@@ -681,10 +678,10 @@ Each phase is independently verifiable on the shipped app.
 | Phase | Deliverable | Verified by |
 |---|---|---|
 | **1** | Pure reverse proxy at `/rest/*`, zero interception — **built** | Point the official macOS Cassette at SpotiFLAC. Everything works exactly as before: browse, play, star, playlists, lyrics, offline downloads. **No regression is the whole test.** |
-| **2** | `search3` injection + `getCoverArt` — **built** | `↓` rows appear below real results, with correct artwork, in the official app. Search latency unchanged when Spotify is slow. |
-| **3** | `star` / `unstar` trigger — **built** | Add to Favorites on a `↓` row → item appears in `GetQueue` → FLAC on disk → track is in Artists/Albums/Songs. |
+| **2** | `search3` injection + `getCoverArt` — **built** | virtual rows appear below real results, with correct artwork, in the official app. Search latency unchanged when Spotify is slow. |
+| **3** | `star` / `unstar` trigger — **built** | Add to Favorites on a virtual row → item appears in `GetQueue` → FLAC on disk → track is in Artists/Albums/Songs. |
 | **4** | Post-download reconciliation: star the real track — **done** | Confirmed on *Hair Salon*: `starred=2026-07-31T13:53:52Z` on the real track, 5s after Navidrome imported it. |
-| **5** | `updatePlaylist` / `createPlaylist` + destination table — **built, not exercised through a client** | Add to Playlist on a `↓` row acquires *and* lands in the chosen playlist after the rescan. |
+| **5** | `updatePlaylist` / `createPlaylist` + destination table — **built, not exercised through a client** | Add to Playlist on a virtual row acquires *and* lands in the chosen playlist after the rescan. |
 | **6** | `stream` intercept — **done** | Pressing play queues without favoriting and waits briefly for playback. A slow acquisition continues in the background. |
 | **7** | Other clients — **done** | Amperfy and Arpeggi verified after the three fixes in §3.1. |
 

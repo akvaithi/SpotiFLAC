@@ -558,18 +558,18 @@ type virtualSong struct {
 	Pending bool
 }
 
-// marker distinguishes "you can fetch this" from "this is on its way".
-func (v virtualSong) marker() string {
+// displayTitle indicates an acquisition already in progress.
+func (v virtualSong) displayTitle() string {
 	if v.Pending {
-		return "⏳ "
+		return "⏳ " + v.Title
 	}
-	return "↓ "
+	return v.Title
 }
 
 func (v virtualSong) jsonMap() map[string]any {
 	m := map[string]any{
 		"id":     v.RowID,
-		"title":  v.marker() + v.Title,
+		"title":  v.displayTitle(),
 		"artist": v.Artist,
 		"album":  v.Album,
 		"isDir":  false,
@@ -599,7 +599,7 @@ func (v virtualSong) xmlElement() string {
 		b.WriteString(`"`)
 	}
 	attr("id", v.RowID)
-	attr("title", v.marker()+v.Title)
+	attr("title", v.displayTitle())
 	attr("artist", v.Artist)
 	attr("album", v.Album)
 	attr("isDir", "false")
@@ -616,7 +616,7 @@ func (v virtualSong) xmlElement() string {
 }
 
 // virtualSongs turns catalog hits into acquirable rows, dropping anything
-// already owned or already on its way.
+// already owned or fetched. In-flight results stay visible.
 //
 // Source-agnostic: Deezer supplies new rows, but a Spotify-sourced row still
 // arrives from a client's cache or a pasted link, and both take this path.
@@ -627,7 +627,7 @@ func (f *subsonicFacade) virtualSongs(query string, tracks []catalogTrack, owned
 	// authority on what is playable, but its search only returned a page of
 	// them; MatchLibrary sees the whole index and is stricter (it false-
 	// negatives on name differences), so either saying "owned" is enough to
-	// drop the row. A stray ↓ on a track you already have is noise, and
+	// drop the row. A duplicate result for a track you already have is noise, and
 	// suppressing it is worth one cheap extra check.
 	inputs := make([]LibMatchInput, 0, len(tracks))
 	for i, t := range tracks {
@@ -1037,7 +1037,7 @@ func (f *subsonicFacade) handleStar(w http.ResponseWriter, r *http.Request) {
 	starring := subsonicEndpoint(r.URL.Path) == "star"
 	for _, spotifyID := range virtual {
 		if starring {
-			// "Add to Favorites" on a ↓ row is the user saying: put this in my
+			// "Add to Favorites" on a virtual row is the user saying: put this in my
 			// library. The file landing in /downloads and being indexed by
 			// Navidrome is exactly that.
 			if err := f.acquire(r.Context(), spotifyID, func(p *pendingAcquisition) { p.Star = true }); err != nil {

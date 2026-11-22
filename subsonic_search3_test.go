@@ -125,8 +125,8 @@ func TestSearch3InjectsOnlyWhatIsMissing(t *testing.T) {
 	if songs[1]["id"] != deezerIDPrefix+"new1" {
 		t.Errorf("expected the missing track injected, got %v", songs[1])
 	}
-	if title, _ := songs[1]["title"].(string); !strings.HasPrefix(title, "↓ ") {
-		t.Errorf("injected row is not marked acquirable: %q", title)
+	if title := songs[1]["title"]; title != "Vaa Vaathi (Flute)" {
+		t.Errorf("injected row title = %q, want the original catalog title", title)
 	}
 	for _, s := range songs {
 		if s["id"] == deezerIDPrefix+"owned" {

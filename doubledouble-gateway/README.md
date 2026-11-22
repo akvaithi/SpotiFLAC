@@ -52,7 +52,8 @@ job fails visibly. The final FLAC identity check remains mandatory.
    verification and the resulting Navidrome row. Update the dashboard catalog.
 
 Arpeggi uses the existing public music URL and Navidrome credentials. Tap a
-download row to queue it without favoriting. The facade waits up to 12 seconds
+catalog result to queue it without favoriting. Fresh results use plain track
+titles. The facade waits up to 12 seconds
 and starts playback if Navidrome has indexed the file. If the source needs more
 time or CAPTCHA, the job continues and the track can be played from the library
 after it appears. See [the Subsonic facade](../SUBSONIC-FACADE.md#55-stream-and-download-on-a-virtual-row).
