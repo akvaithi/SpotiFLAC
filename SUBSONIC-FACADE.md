@@ -14,6 +14,14 @@ deployment and source tests. The design below records the original rollout.
 Section 5.5 describes current playback. Fresh results use the catalog title.
 An hourglass appears only while the acquisition is in progress.
 
+**Private playlists.** The facade serves the ListenBrainz discovery mix and
+Spotify imports through ordinary private Navidrome playlist IDs. It adds
+entries only after Navidrome returns an authorized private playlist. Imports
+retain source order and use Navidrome song IDs for library matches and Spotify
+catalog IDs for on-demand entries. A now-playing report from the discovery
+mix can queue one track ahead. Spotify's stored playlist import can be
+repeated explicitly by the operator.
+
 Injection is opt-in: `SUBSONIC_FACADE=inject`. Unset is a pure reverse proxy, which is
 what any new deployment should run first — if the pass-through is not invisible,
 nothing built on top of it matters.

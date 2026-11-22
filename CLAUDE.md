@@ -20,6 +20,14 @@ Arun requested restoration of Arpeggi acquisition using us.doubledouble.top.
   4533 and host loopback port 4534. The tunnel configuration stays unchanged. Keep the dashboard catalog in sync.
 - Tap a virtual row to queue without favoriting. The facade waits up to 12 seconds
   for Navidrome to index the track. The durable queue continues after that wait.
+- The host's `listenbrainz-mix.timer` refreshes the private discovery, library
+  and daily mood playlists. The Spotify account snapshot is refreshed by
+  akvcloud's `spotify-sync.timer`.
+- `deploy/import-spotify-playlists.py` is the one-time transfer into private
+  Navidrome playlists. The facade serves local and on-demand entries in source
+  order. Rerun it with the host's `navidrome-mix` systemd credential after a
+  Spotify snapshot refresh. See the akvcloud music and server handoff for the
+  exact command.
 - See doubledouble-gateway/README.md for the current deployment, recovery,
   provider trials and rollback.
 
