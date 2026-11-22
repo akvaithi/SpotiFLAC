@@ -284,25 +284,25 @@ type SpotifyMetadataRequest struct {
 }
 
 type DownloadRequest struct {
-	Service                    string `json:"service"`
-	Query                      string `json:"query,omitempty"`
-	TrackName                  string `json:"track_name,omitempty"`
-	ArtistName                 string `json:"artist_name,omitempty"`
-	AlbumName                  string `json:"album_name,omitempty"`
-	AlbumArtist                string `json:"album_artist,omitempty"`
-	ReleaseDate                string `json:"release_date,omitempty"`
-	CoverURL                   string `json:"cover_url,omitempty"`
-	OutputDir                  string `json:"output_dir,omitempty"`
-	AudioFormat                string `json:"audio_format,omitempty"`
-	FilenameFormat             string `json:"filename_format,omitempty"`
-	TrackNumber                bool   `json:"track_number,omitempty"`
-	Position                   int    `json:"position,omitempty"`
-	UseAlbumTrackNumber        bool   `json:"use_album_track_number,omitempty"`
-	SpotifyID                  string `json:"spotify_id,omitempty"`
+	Service             string `json:"service"`
+	Query               string `json:"query,omitempty"`
+	TrackName           string `json:"track_name,omitempty"`
+	ArtistName          string `json:"artist_name,omitempty"`
+	AlbumName           string `json:"album_name,omitempty"`
+	AlbumArtist         string `json:"album_artist,omitempty"`
+	ReleaseDate         string `json:"release_date,omitempty"`
+	CoverURL            string `json:"cover_url,omitempty"`
+	OutputDir           string `json:"output_dir,omitempty"`
+	AudioFormat         string `json:"audio_format,omitempty"`
+	FilenameFormat      string `json:"filename_format,omitempty"`
+	TrackNumber         bool   `json:"track_number,omitempty"`
+	Position            int    `json:"position,omitempty"`
+	UseAlbumTrackNumber bool   `json:"use_album_track_number,omitempty"`
+	SpotifyID           string `json:"spotify_id,omitempty"`
 	// DeezerID identifies the source recording exactly. Set by anything that
 	// found the track in Deezer's own catalog, and when present it replaces the
 	// entire link-resolution chain.
-	DeezerID string `json:"deezer_id,omitempty"`
+	DeezerID                   string `json:"deezer_id,omitempty"`
 	EmbedLyrics                bool   `json:"embed_lyrics,omitempty"`
 	EmbedMaxQualityCover       bool   `json:"embed_max_quality_cover,omitempty"`
 	Duration                   int    `json:"duration,omitempty"`
@@ -550,12 +550,12 @@ func (a *App) SearchSpotifyByType(req SpotifySearchByTypeRequest) ([]backend.Sea
 func (a *App) DownloadTrack(req DownloadRequest) (DownloadResponse, error) {
 
 	if req.Service == "" {
-		req.Service = "flacit"
+		req.Service = "doubledouble"
 	}
-	if req.Service != "flacit" {
+	if req.Service != "doubledouble" && req.Service != "flacit" {
 		return DownloadResponse{
 			Success: false,
-			Error:   fmt.Sprintf("unknown service: %q (only the Telegram gateway is supported)", req.Service),
+			Error:   fmt.Sprintf("unknown service: %q (only DoubleDouble is supported)", req.Service),
 		}, fmt.Errorf("unknown service: %s", req.Service)
 	}
 

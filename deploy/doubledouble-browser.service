@@ -1,0 +1,18 @@
+[Unit]
+Description=DoubleDouble direct-download adapter in server Chromium
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The source script is installed from the Mac-maintained checkout; no Docker socket is exposed to SpotiFLAC.
+ExecStartPre=/usr/bin/install -d -o 1000 -g 1000 -m 0700 /srv/fast/apps/chromium/config/doubledouble
+ExecStartPre=/usr/bin/install -o 1000 -g 1000 -m 0644 /srv/fast/apps/SpotiFLAC/doubledouble-gateway/gateway.py /srv/fast/apps/chromium/config/doubledouble/gateway.py
+ExecStart=/usr/bin/docker exec -u abc -e DD_DISPLAY=:0 chromium python3 /config/doubledouble/gateway.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

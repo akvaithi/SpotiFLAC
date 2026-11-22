@@ -14,11 +14,9 @@ import (
 	"time"
 )
 
-// FlacItDownloader is SpotiFLAC's only download source: it talks to the
-// flacit-gateway sidecar, which drives @deezload2bot over Telegram MTProto to
-// fetch a Deezer-sourced lossless FLAC and pulls it down with 16 parallel
-// connections. The Tidal/Qobuz/Amazon engines this replaced are gone — no
-// fallback by design, see CLAUDE.md.
+// FlacItDownloader keeps the original source adapter contract so saved queue
+// records and clients remain compatible. The configured source is DoubleDouble's
+// direct-download browser adapter; Telegram is no longer used by this deployment.
 type FlacItDownloader struct {
 	gatewayURL string
 	client     *http.Client
@@ -49,7 +47,7 @@ type flacItJobView struct {
 
 const (
 	flacItPollInterval = 500 * time.Millisecond
-	flacItJobDeadline  = 5 * time.Minute
+	flacItJobDeadline  = 30 * time.Minute
 )
 
 // Download resolves spotifyID to a Deezer (preferred) or Spotify track link,
@@ -69,7 +67,7 @@ func (f *FlacItDownloader) Download(
 	useFirstArtistOnly, useSingleGenre, embedGenre bool,
 ) (string, error) {
 	if f.gatewayURL == "" {
-		return "", fmt.Errorf("no Telegram gateway configured (FLACIT_GATEWAY_URL / flacitApiUrl)")
+		return "", fmt.Errorf("no DoubleDouble gateway configured")
 	}
 	if outputDir != "." {
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -169,7 +167,7 @@ func (f *FlacItDownloader) Download(
 	f.SourceURL = trackURL
 	f.SourceLabel = fmt.Sprintf("%s - %s", artistName, trackName)
 
-	fmt.Printf("Fetching via Telegram gateway: %s\n", trackURL)
+	fmt.Printf("Fetching via DoubleDouble: %s\n", trackURL)
 	jobID, err := f.submitFetch(trackURL, trackName, artistName)
 	if err != nil {
 		return "", fmt.Errorf("gateway: %w", err)
@@ -181,6 +179,12 @@ func (f *FlacItDownloader) Download(
 	}
 
 	if err := f.downloadFile(jobID, expectedPath); err != nil {
+		return "", err
+	}
+
+	// Check the original tags before overwriting them with the requested metadata.
+	if err := validateSourceTrack(expectedPath, trackName, artistName, isrc); err != nil {
+		os.Remove(expectedPath)
 		return "", err
 	}
 
@@ -473,6 +477,10 @@ func (f *FlacItDownloader) awaitReady(jobID string) error {
 				return fmt.Errorf("%s", view.Error)
 			}
 			return fmt.Errorf("gateway job failed")
+		case "waiting_verification":
+			if itemID != "" {
+				SetItemPhase(itemID, "verification")
+			}
 		case "resolving":
 			// The bulk of a fetch's wall time lives here — the bot searching
 			// Deezer and replying over Telegram, tens of seconds by design
@@ -498,7 +506,7 @@ func (f *FlacItDownloader) awaitReady(jobID string) error {
 			return err
 		}
 	}
-	return fmt.Errorf("timed out waiting for the Telegram gateway")
+	return fmt.Errorf("timed out waiting for DoubleDouble verification or download")
 }
 
 func (f *FlacItDownloader) downloadFile(jobID, savePath string) error {
@@ -542,4 +550,29 @@ func (f *FlacItDownloader) deleteJob(jobID string) {
 		return
 	}
 	resp.Body.Close()
+}
+
+// validateSourceTrack refuses a wrong recording before it can be retagged as the
+// requested song. Missing identity tags are an error, not evidence of a match.
+func validateSourceTrack(path, title, artist, isrc string) error {
+	meta, err := ReadAudioMetadata(path)
+	if err != nil || meta == nil {
+		return fmt.Errorf("could not validate the downloaded FLAC metadata")
+	}
+	return validateSourceIdentity(meta, title, artist, isrc)
+}
+
+func validateSourceIdentity(meta *AudioMetadata, title, artist, isrc string) error {
+	if meta.ISRC != "" && isrc != "" {
+		if !strings.EqualFold(strings.TrimSpace(meta.ISRC), strings.TrimSpace(isrc)) {
+			return fmt.Errorf("downloaded FLAC has a different ISRC")
+		}
+		return nil
+	}
+	want := KeepAlphanumeric(strings.ToLower(title))
+	have := KeepAlphanumeric(strings.ToLower(meta.Title))
+	if want == "" || have == "" || want != have || meta.Artist == "" || !ArtistsOverlap(meta.Artist, artist) {
+		return fmt.Errorf("downloaded FLAC title or artist does not match the requested recording")
+	}
+	return nil
 }

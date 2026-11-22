@@ -92,17 +92,14 @@ func LoadConfigSettings() (map[string]interface{}, error) {
 	return SanitizeSettingsMap(settings), nil
 }
 
-// defaultFlacItGatewayURL is docker0's host gateway plus flacit-gateway's
-// published port. It must never be a container IP or container name: both
-// containers run network_mode: bridge, so container IPs shift on every
-// recreate and container-name DNS doesn't resolve — this is the same trap
-// that used to silently break the Tidal gateway URL after a deploy.
-const defaultFlacItGatewayURL = "http://172.17.0.1:8082"
+// The browser source runs inside the existing Chromium container on a shared
+// Docker network. Keep legacy settings readable for existing callers.
+const defaultFlacItGatewayURL = "http://chromium:8082"
 
-// GetFlacItGatewayURL resolves the Telegram gateway address: FLACIT_GATEWAY_URL
-// env var first (set on the container), then the persisted "flacitApiUrl"
-// setting, then the docker0 default.
 func GetFlacItGatewayURL() string {
+	if source := strings.TrimSpace(os.Getenv("DOUBLEDOUBLE_GATEWAY_URL")); source != "" {
+		return strings.TrimRight(source, "/")
+	}
 	if fromEnv := strings.TrimSpace(os.Getenv("FLACIT_GATEWAY_URL")); fromEnv != "" {
 		return strings.TrimRight(fromEnv, "/")
 	}

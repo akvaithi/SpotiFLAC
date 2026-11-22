@@ -1,29 +1,32 @@
+name: spotiflac
 services:
   spotiflac:
     image: ghcr.io/akvaithi/spotiflac:latest
     container_name: spotiflac
+    user: "1000:1000"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
-      # Left side = path on your ZimaOS host. Adjust to your shares.
-      - /DATA/Media/Music:/downloads
-      - /DATA/AppData/spotiflac:/config
+      - /srv/media/Music:/downloads
+      - ./config:/config
     environment:
-      - ADDR=:8080
-      - DOWNLOAD_DIR=/downloads
-      - CONFIG_DIR=/config
-      - FLACIT_GATEWAY_URL=http://172.17.0.1:8082
+      ADDR: :8080
+      DOWNLOAD_DIR: /downloads
+      CONFIG_DIR: /config
+      DOUBLEDOUBLE_GATEWAY_URL: http://chromium:8082
+      SUBSONIC_FACADE: inject
+      NAVIDROME_URL: http://navidrome:4533
+      NAVIDROME_USER: ${NAVIDROME_USER:?Read the Navidrome account from Keychain}
+      NAVIDROME_PASSWORD: ${NAVIDROME_PASSWORD:?Read the Navidrome password from Keychain}
+      API_TOKEN: ${API_TOKEN:?Read the existing SpotiFLAC API token from Keychain}
+    networks:
+      - chromium
+      - navidrome
     restart: unless-stopped
-
-  # SpotiFLAC's only download source: drives @deezload2bot over Telegram to
-  # fetch lossless FLAC. Needs an authenticated Telethon session at
-  # /DATA/AppData/flacit-gateway/telegram-session.session — see
-  # flacit-gateway/README.md for the one-time login/bootstrap.
-  flacit-gateway:
-    image: ghcr.io/akvaithi/flacit-gateway:latest
-    container_name: flacit-gateway
-    ports:
-      - "8082:8082"
-    volumes:
-      - /DATA/AppData/flacit-gateway:/config
-    restart: unless-stopped
+networks:
+  chromium:
+    external: true
+    name: chromium_default
+  navidrome:
+    external: true
+    name: navidrome_default

@@ -248,6 +248,23 @@ func (f *subsonicFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
+	// Virtual acquisition must authenticate before queueing, just as ordinary
+	// Navidrome writes do. Never let a made-up catalog ID bypass upstream auth.
+	endpoint := subsonicEndpoint(r.URL.Path)
+	if endpoint == "star" || endpoint == "unstar" || endpoint == "stream" || endpoint == "download" || endpoint == "createPlaylist" || endpoint == "updatePlaylist" {
+		virtual := false
+		for _, key := range []string{"id", "songId", "songIdToAdd"} {
+			for _, id := range r.URL.Query()[key] {
+				if _, _, ok := parseRowID(id); ok {
+					virtual = true
+				}
+			}
+		}
+		if virtual && !f.authenticated(r) {
+			f.proxy.ServeHTTP(w, r)
+			return
+		}
+	}
 
 	switch subsonicEndpoint(r.URL.Path) {
 	case "search3":
@@ -263,6 +280,29 @@ func (f *subsonicFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.proxy.ServeHTTP(w, r)
 	}
+}
+
+func (f *subsonicFacade) authenticated(r *http.Request) bool {
+	q := url.Values{"f": {"json"}}
+	for _, key := range []string{"u", "t", "s", "p", "apiKey", "v", "c"} {
+		if values := r.URL.Query()[key]; len(values) != 0 {
+			q[key] = values
+		}
+	}
+	target := *f.target
+	target.Path = "/rest/ping.view"
+	target.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target.String(), nil)
+	if err != nil {
+		return false
+	}
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var envelope subsonicEnvelope
+	return resp.StatusCode == http.StatusOK && json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&envelope) == nil && envelope.Response.Status == "ok"
 }
 
 // -----------------------------------------------------------------------------
@@ -1146,7 +1186,7 @@ func (f *subsonicFacade) acquire(rowID string, note func(*pendingAcquisition)) e
 	}
 
 	req := DownloadRequest{
-		Service:    "flacit",
+		Service:    "doubledouble",
 		TrackName:  meta.Title,
 		ArtistName: meta.Artists,
 		AlbumName:  meta.Album,

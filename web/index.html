@@ -135,10 +135,10 @@
       <div class="row"><button id="saveSettings" class="primary">Save settings</button><span id="settingsMsg" class="msg"></span></div>
     </div>
     <div class="card">
-      <h3>Telegram gateway</h3>
-      <p class="muted small">SpotiFLAC's only download source: a Telethon session drives @deezload2bot and pulls the FLAC it posts. Leave blank to use the default (<code>http://172.17.0.1:8082</code>, the flacit-gateway container's docker0 address).</p>
+      <h3>DoubleDouble downloads</h3>
+      <p class="muted small">Downloads use us.doubledouble.top in server Chromium. Complete its CAPTCHA there when prompted; queued tracks resume automatically. Pixeldrain uploads are always disabled.</p>
       <label class="field">Gateway URL
-        <div class="row"><input id="setFlacitApi" type="text" placeholder="http://172.17.0.1:8082" style="flex:1"><button id="testFlacit" class="small">Check</button></div>
+        <div class="row"><input id="setFlacitApi" type="text" placeholder="http://chromium:8082" style="flex:1"><button id="testFlacit" class="small">Check</button></div>
         <small class="muted" id="flacitApiMsg"></small>
       </label>
       <div class="row"><button id="saveFlacitApi" class="primary">Save gateway URL</button><span id="flacitApisMsg" class="msg"></span></div>

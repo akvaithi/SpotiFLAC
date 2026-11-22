@@ -185,7 +185,7 @@ function trackRowHTML(t, withCheckbox) {
 function buildRequest(t) {
   const s = state.settings || {};
   return {
-    service: 'flacit',
+    service: 'doubledouble',
     spotify_id: t.spotify_id || t.id || '',
     track_name: t.name || '',
     artist_name: t.artists || '',
@@ -564,18 +564,18 @@ $('saveSettings').onclick = async () => {
 // ---------- telegram gateway status ----------
 function flacitStatusText(status) {
   if (!status || !status.ok) return '❌ unreachable' + (status && status.error ? ' — ' + status.error : '');
-  if (!status.logged_in) return '⚠️ not logged in — open ' + (status.gateway_url || '') + '/login';
-  return '✅ logged in as ' + (status.me || 'unknown') + (status.flac_quality_set ? '' : ' — FLAC quality not yet confirmed');
+  if (status.waiting_verification) return 'Waiting for CAPTCHA verification in server Chromium. Pixeldrain is disabled.';
+  return 'Ready. Direct downloads only; Pixeldrain is disabled. CAPTCHA verification may be required in server Chromium.';
 }
 async function checkFlacitStatus() {
   const el = $('gatewayIndicator');
   if (!el) return;
   try {
     const status = await rpc('GetFlacItStatus');
-    el.textContent = 'Telegram gateway: ' + flacitStatusText(status);
+    el.textContent = 'DoubleDouble: ' + flacitStatusText(status);
     el.style.display = 'block';
   } catch (e) {
-    el.textContent = 'Telegram gateway: status check failed — ' + e.message;
+    el.textContent = 'DoubleDouble: status check failed — ' + e.message;
     el.style.display = 'block';
   }
 }

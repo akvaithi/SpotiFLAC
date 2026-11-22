@@ -14,70 +14,26 @@ the Spotify catalog and download a track to the server by favouriting it. See
 > Personal, self-hosted tooling — see [`README-WEB.md`](README-WEB.md) for the full
 > architecture and [`SETUP.md`](SETUP.md) for a from-scratch ZimaOS/Docker walkthrough.
 
-## Custom download engine: Telegram, not Tidal/Qobuz/Amazon
+## Current download source: DoubleDouble
 
-The upstream project resolves a Spotify track against Tidal, Qobuz and Amazon
-Music, each behind its own community-server/gateway arrangement. This fork
-replaces all three with a single custom source, ported from
-[**FlacIt**](https://github.com/BunnY-exe/FlacIt): a `flacit-gateway` sidecar
-runs a persistent [Telethon](https://github.com/LonamiWebs/Telethon) (MTProto)
-session against Telegram's `@deezload2bot`, which sources lossless FLAC from
-Deezer, and pulls the result down with 16 parallel connections against the
-file's own Telegram data center.
+Search in Arpeggi, then favourite a download result to queue it on the server.
+The Subsonic facade forwards ordinary playback and library operations to Navidrome.
+Downloads now use [us.doubledouble.top](https://us.doubledouble.top), through a
+separate profile in the existing server Chromium container. The old Telegram source
+is retained in the repository as historical code and is not deployed.
 
-```
-web UI ──HTTP/SSE──► spotiflac (Go)  ── Spotify catalog, tagging, queue,
-                          │              library index, dedup, enrichment
-                          └──HTTP──► flacit-gateway (Python/Telethon)
-                                       ── drives @deezload2bot, downloads
-                                          the FLAC it posts
-```
+Pixeldrain and other external uploads are always disabled in both the page controls
+and the download request. Only same-origin direct downloads are accepted. Single-track
+ZIPs are unpacked safely; a response containing multiple tracks or lossy audio is rejected.
+The original audio identity is checked before SpotiFLAC writes the requested tags.
 
-Two containers, two images (`ghcr.io/akvaithi/spotiflac`,
-`ghcr.io/akvaithi/flacit-gateway`) — everything Spotify-side (catalog, search,
-metadata, tagging, the durable download queue, library dedup, lyrics/genre/cover
-enrichment, Navidrome rescan) is unchanged from upstream and provider-agnostic;
-only the *download source* was swapped. Trade-offs that come with it: 16-bit/
-44.1kHz FLAC only (no hi-res tier), and no fallback source for a track Deezer
-doesn't carry. See [`CLAUDE.md`](CLAUDE.md) for the mechanism in full and
-[`flacit-gateway/README.md`](flacit-gateway/README.md) for that sidecar's own
-contract.
+DoubleDouble currently requires a CAPTCHA. Its own page handles verification in
+server Chromium; the queue waits up to 25 minutes for the user and resumes afterward.
+No CAPTCHA is solved or bypassed by this code. The browser profile keeps the site's
+session between downloads, subject to the site's own expiry rules.
 
-## Quick start
-
-```bash
-docker compose up -d
-# then open http://<host>:8080
-```
-
-Needs a bootstrapped Telegram session before downloads work — see
-[`SETUP.md`](SETUP.md) for the full walkthrough, including how to get one.
-
-## FAQ
-
-<details>
-<summary>Is this free?</summary>
-
-Yes. No account, login or subscription — the Telegram bot and Spotify's public
-metadata are all it needs.
-
-</details>
-
-<details>
-<summary>Can this get my Spotify account suspended or banned?</summary>
-
-No. Spotify data is read from its public web player, not through user
-authentication — there's no Spotify login involved at all.
-
-</details>
-
-<details>
-<summary>Where does the audio come from?</summary>
-
-Deezer, by way of a Telegram bot (`@deezload2bot`) — see the architecture
-section above.
-
-</details>
+See [the current deployment guide](doubledouble-gateway/README.md) for server setup,
+verification and rollback. Older setup documents describe the retired deployment.
 
 ## Disclaimer
 

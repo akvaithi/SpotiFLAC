@@ -32,3 +32,8 @@ temp/
 *.tmp
 *.bak
 *.old
+
+# Runtime state and Python bytecode
+/config/
+__pycache__/
+*.pyc

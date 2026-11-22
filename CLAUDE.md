@@ -1,3 +1,26 @@
+# Current deployment, 2026-11-22
+
+This section supersedes the historical Telegram and ZimaOS instructions below.
+Arun requested restoration of Arpeggi acquisition using us.doubledouble.top.
+
+- Edit on the Mac in ~/Developer/SpotiFLAC, push, then pull on akvcloud.
+- The download source is doubledouble-gateway/gateway.py, installed into the existing
+  Chromium container by deploy/doubledouble-browser.service. No Telegram service runs.
+- The site's own CAPTCHA must be completed by the user in server Chromium. Never
+  add a solver, evasion flags or a verification bypass.
+- Pixeldrain is always disabled. Strip external from source requests, keep its checkbox
+  unchecked, and accept direct download URLs only from us.doubledouble.top.
+- Use exact Deezer track links from the existing facade. No fuzzy source search.
+- A ZIP must contain exactly one FLAC. Validate its original identity before retagging.
+- The service uses /srv/media/Music and /srv/fast/apps/SpotiFLAC/config on akvcloud.
+- Read Navidrome and SpotiFLAC API credentials from the Mac Keychain at deploy time;
+  pass them to compose through its process environment, never through a committed file.
+- The public music hostname routes only /rest/ through SpotiFLAC; the Navidrome web
+  interface remains the default route. Keep the dashboard catalog in sync.
+- See doubledouble-gateway/README.md for the current deployment and rollback.
+
+## Historical implementation notes
+
 # CLAUDE.md — working in this repo
 
 This is a **headless web/Docker rebuild of SpotiFLAC** (originally a Wails desktop
