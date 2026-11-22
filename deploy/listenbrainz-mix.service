@@ -1,0 +1,17 @@
+[Unit]
+Description=Refresh the ListenBrainz discovery playlist
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=akvaithi
+UMask=0077
+EnvironmentFile=/etc/spotiflac/listenbrainz-mix.env
+ExecStart=/usr/bin/python3 /srv/fast/apps/SpotiFLAC/deploy/listenbrainz-mix.py
+TimeoutStartSec=5min
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/fast/apps/SpotiFLAC/config
+# SQLite uses the read-only library file and its existing WAL sidecars.

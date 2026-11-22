@@ -274,6 +274,8 @@ func (f *subsonicFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.handleSearch3(w, r)
 	case "getCoverArt":
 		f.handleGetCoverArt(w, r)
+	case "getPlaylists", "getPlaylist":
+		f.handleDiscoveryMix(w, r)
 	case "star", "unstar":
 		f.handleStar(w, r)
 	case "stream", "download":
@@ -588,9 +590,10 @@ func (v virtualSong) jsonMap() map[string]any {
 	return m
 }
 
-func (v virtualSong) xmlElement() string {
+func (v virtualSong) xmlElement(tag string) string {
 	var b strings.Builder
-	b.WriteString("<song")
+	b.WriteByte('<')
+	b.WriteString(tag)
 	attr := func(name, value string) {
 		b.WriteString(" ")
 		b.WriteString(name)
@@ -818,7 +821,7 @@ func ownedSetXML(body []byte) (owned ownedSet, songCount int, ok bool) {
 func injectXMLSongs(body []byte, songs []virtualSong) ([]byte, bool) {
 	var rows strings.Builder
 	for _, s := range songs {
-		rows.WriteString(s.xmlElement())
+		rows.WriteString(s.xmlElement("song"))
 	}
 
 	// Normal case: a populated element to append to.

@@ -143,10 +143,10 @@ func TestPendingRowStaysVisible(t *testing.T) {
 	if got := fresh.jsonMap()["title"]; got != fresh.Title {
 		t.Errorf("acquirable row title = %q, want %q", got, fresh.Title)
 	}
-	if !strings.Contains(fresh.xmlElement(), `title="Hair Salon"`) {
-		t.Errorf("XML rendering changed the catalog title: %s", fresh.xmlElement())
+	if !strings.Contains(fresh.xmlElement("song"), `title="Hair Salon"`) {
+		t.Errorf("XML rendering changed the catalog title: %s", fresh.xmlElement("song"))
 	}
-	if !strings.Contains(pending.xmlElement(), "⏳") {
+	if !strings.Contains(pending.xmlElement("song"), "⏳") {
 		t.Error("XML rendering lost the pending marker")
 	}
 }
