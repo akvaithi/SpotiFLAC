@@ -22,7 +22,7 @@ func TestIndexedDownloadUsesExactPathAndCallerCredentials(t *testing.T) {
 			http.Error(w, "unexpected search", http.StatusBadRequest)
 			return
 		}
-		fmt.Fprint(w, `{"subsonic-response":{"searchResult3":{"song":[{"id":"other","path":"Artist/Live/Song.flac"},{"id":"exact","path":"Artist/Album/Song.flac"}]}}}`)
+		fmt.Fprint(w, `{"subsonic-response":{"searchResult3":{"song":[{"id":"other","path":"Artist/Live/Song.flac"},{"id":"exact","path":"Artist/Album/Song.flac","title":"Song","album":"Album","artist":"Artist","isrc":["ABAAA0100001"]}]}}}`)
 	}))
 	defer upstream.Close()
 	target, err := url.Parse(upstream.URL)
@@ -34,6 +34,16 @@ func TestIndexedDownloadUsesExactPathAndCallerCredentials(t *testing.T) {
 	record := backend.QueueRecord{TrackName: "Song", FilePath: filepath.Join(downloadDir, "Artist", "Album", "Song.flac")}
 	if id := facade.indexedDownload(request, record); id != "exact" {
 		t.Fatalf("got ID %q, want exact", id)
+	}
+	record.FilePath = filepath.Join(downloadDir, "before-move.flac")
+	record.ArtistName, record.AlbumName = "Artist", "Album"
+	record.Request = []byte(`{"isrc":"ABAAA0100001"}`)
+	if id := facade.indexedDownload(request, record); id != "exact" {
+		t.Fatalf("got ID %q for a moved, matching download", id)
+	}
+	record.Request = []byte(`{"isrc":"ABAAA0100002"}`)
+	if id := facade.indexedDownload(request, record); id != "" {
+		t.Fatalf("got ID %q for a different recording", id)
 	}
 	record.FilePath = filepath.Join(downloadDir, "..", "Artist", "Album", "Song.flac")
 	if id := facade.indexedDownload(request, record); id != "" {

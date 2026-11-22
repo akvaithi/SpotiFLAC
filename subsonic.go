@@ -1139,6 +1139,11 @@ func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
+	if rec := playbackQueueRecord(id); rec.Status == backend.QueueCompleted {
+		if f.proxyIndexedDownload(w, r, ctx, rec) {
+			return
+		}
+	}
 	if err := f.acquire(ctx, id, nil); err != nil {
 		log.Printf("subsonic facade: could not enqueue %s: %v", id, err)
 		writeSubsonicError(w, r, 0, "Could not queue download")
@@ -1152,12 +1157,7 @@ func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 		rec := playbackQueueRecord(id)
 		switch rec.Status {
 		case backend.QueueCompleted:
-			if songID := f.indexedDownload(r.Clone(ctx), rec); songID != "" {
-				proxied := r.Clone(r.Context())
-				q := proxied.URL.Query()
-				q.Set("id", songID)
-				proxied.URL.RawQuery = q.Encode()
-				f.proxy.ServeHTTP(w, proxied)
+			if f.proxyIndexedDownload(w, r, ctx, rec) {
 				return
 			}
 		case backend.QueueFailed, backend.QueueCancelled:
@@ -1174,6 +1174,19 @@ func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Context().Err() == nil {
 		writeSubsonicError(w, r, 70, "Download is still processing. Tap again once it appears in your library.")
 	}
+}
+
+func (f *subsonicFacade) proxyIndexedDownload(w http.ResponseWriter, r *http.Request, ctx context.Context, rec backend.QueueRecord) bool {
+	songID := f.indexedDownload(r.Clone(ctx), rec)
+	if songID == "" {
+		return false
+	}
+	proxied := r.Clone(r.Context())
+	q := proxied.URL.Query()
+	q.Set("id", songID)
+	proxied.URL.RawQuery = q.Encode()
+	f.proxy.ServeHTTP(w, proxied)
+	return true
 }
 
 func playbackQueueRecord(rowID string) backend.QueueRecord {
@@ -1219,17 +1232,42 @@ func (f *subsonicFacade) indexedDownload(r *http.Request, rec backend.QueueRecor
 	var payload struct {
 		Response struct {
 			SearchResult3 struct {
-				Songs []struct{ ID, Path string } `json:"song"`
+				Songs []struct {
+					ID, Path, Title, Artist, Album string
+					ISRC                           []string
+				} `json:"song"`
 			} `json:"searchResult3"`
 		} `json:"subsonic-response"`
 	}
 	if json.Unmarshal(body, &payload) != nil {
 		return ""
 	}
+	var request DownloadRequest
+	_ = json.Unmarshal(rec.Request, &request)
+	wantISRC := strings.ToUpper(strings.TrimSpace(request.ISRC))
+	match := ""
+	ambiguous := false
 	for _, song := range payload.Response.SearchResult3.Songs {
 		if song.Path == filepath.ToSlash(relative) {
 			return song.ID
 		}
+		// Media Check can reorganize completed downloads. Match their recording
+		// code and the release, or require an unambiguous metadata match for
+		// older queue records carrying no recording code.
+		if wantISRC != "" && !contains(song.ISRC, wantISRC) {
+			continue
+		}
+		if rec.AlbumName == "" || rec.ArtistName == "" ||
+			!strings.EqualFold(strings.TrimSpace(song.Title), strings.TrimSpace(rec.TrackName)) ||
+			!strings.EqualFold(strings.TrimSpace(song.Album), strings.TrimSpace(rec.AlbumName)) ||
+			!artistsOverlap(song.Artist, rec.ArtistName) {
+			continue
+		}
+		ambiguous = ambiguous || match != ""
+		match = song.ID
+	}
+	if !ambiguous {
+		return match
 	}
 	return ""
 }
