@@ -275,7 +275,7 @@ func (f *subsonicFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "getCoverArt":
 		f.handleGetCoverArt(w, r)
 	case "getPlaylists", "getPlaylist":
-		f.handleDiscoveryMix(w, r)
+		f.handlePlaylistOverlays(w, r)
 	case "star", "unstar":
 		f.handleStar(w, r)
 	case "stream", "download":
@@ -552,6 +552,9 @@ func parseRowID(id string) (source, catalogID string, ok bool) {
 type virtualSong struct {
 	RowID    string
 	CoverID  string
+	AlbumID  string
+	ArtistID string
+	Suffix   string
 	Title    string
 	Artist   string
 	Album    string
@@ -570,6 +573,13 @@ func (v virtualSong) displayTitle() string {
 	return v.Title
 }
 
+func (v virtualSong) fileSuffix() string {
+	if v.Suffix != "" {
+		return v.Suffix
+	}
+	return "flac"
+}
+
 func (v virtualSong) jsonMap() map[string]any {
 	m := map[string]any{
 		"id":     v.RowID,
@@ -578,13 +588,19 @@ func (v virtualSong) jsonMap() map[string]any {
 		"album":  v.Album,
 		"isDir":  false,
 		"type":   "music",
-		"suffix": "flac",
+		"suffix": v.fileSuffix(),
 		// Deliberately absent: created / starred / played. They are Date?
 		// on the client and a malformed date would fail the decode for the
 		// whole response, taking the real results down with it.
 	}
 	if v.HasCover {
 		m["coverArt"] = v.CoverID
+	}
+	if v.AlbumID != "" {
+		m["albumId"], m["parent"] = v.AlbumID, v.AlbumID
+	}
+	if v.ArtistID != "" {
+		m["artistId"] = v.ArtistID
 	}
 	if v.Duration > 0 {
 		m["duration"] = v.Duration
@@ -609,7 +625,14 @@ func (v virtualSong) xmlElement(tag string) string {
 	attr("album", v.Album)
 	attr("isDir", "false")
 	attr("type", "music")
-	attr("suffix", "flac")
+	attr("suffix", v.fileSuffix())
+	if v.AlbumID != "" {
+		attr("albumId", v.AlbumID)
+		attr("parent", v.AlbumID)
+	}
+	if v.ArtistID != "" {
+		attr("artistId", v.ArtistID)
+	}
 	if v.HasCover {
 		attr("coverArt", v.CoverID)
 	}

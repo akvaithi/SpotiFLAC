@@ -42,13 +42,98 @@ func loadDiscoveryMix() (discoveryMix, time.Time) {
 	return mix, time.Time{}
 }
 
-// The mix uses an ordinary private Navidrome playlist for its ID and access
-// control. Only decorate playlist rows returned to this caller by Navidrome.
-func (f *subsonicFacade) handleDiscoveryMix(w http.ResponseWriter, r *http.Request) {
+type importedPlaylistTrack struct {
+	catalogTrack
+	LocalID  string
+	AlbumID  string
+	ArtistID string
+	Suffix   string
+	HasCover bool
+}
+
+type playlistOverlay struct {
+	id        string
+	published time.Time
+	rows      []virtualSong
+	catalog   []catalogTrack
+}
+
+func loadImportedPlaylists() []playlistOverlay {
+	dir := os.Getenv("CONFIG_DIR")
+	if dir == "" {
+		return nil
+	}
+	file, err := os.Open(filepath.Join(dir, "spotify-playlists.json"))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return nil
+	}
+	var playlists map[string][]importedPlaylistTrack
+	if json.NewDecoder(io.LimitReader(file, 4<<20)).Decode(&playlists) != nil {
+		return nil
+	}
+	overlays := make([]playlistOverlay, 0, len(playlists))
+	for id, tracks := range playlists {
+		p := playlistOverlay{id: id, published: stat.ModTime()}
+		for _, track := range tracks {
+			row := virtualSong{Title: track.Title, Artist: track.Artists, Album: track.Album, Duration: track.Duration}
+			if track.LocalID != "" {
+				row.RowID = track.LocalID
+				row.AlbumID, row.ArtistID, row.Suffix = track.AlbumID, track.ArtistID, track.Suffix
+				row.CoverID, row.HasCover = "mf-"+track.LocalID, track.HasCover
+			} else {
+				if track.Source != catalogSpotify || !spotifyTrackID.MatchString(track.ID) {
+					continue
+				}
+				row.RowID, row.CoverID, row.HasCover = track.rowID(), track.coverID(), track.CoverURL != ""
+				p.catalog = append(p.catalog, track.catalogTrack)
+			}
+			p.rows = append(p.rows, row)
+		}
+		overlays = append(overlays, p)
+	}
+	return overlays
+}
+
+func discoveryOverlay(mix discoveryMix, published time.Time) playlistOverlay {
+	overlay := playlistOverlay{id: mix.PlaylistID, published: published}
+	for _, track := range mix.Tracks {
+		id, err := strconv.ParseInt(track.ID, 10, 64)
+		if track.Source != catalogDeezer || err != nil || id <= 0 || track.Title == "" || track.Artists == "" {
+			continue
+		}
+		overlay.catalog = append(overlay.catalog, track)
+		overlay.rows = append(overlay.rows, virtualSong{
+			RowID: track.rowID(), CoverID: track.coverID(), Title: track.Title,
+			Artist: track.Artists, Album: track.Album, HasCover: track.CoverURL != "",
+			Duration: track.Duration,
+		})
+	}
+	return overlay
+}
+
+// Use ordinary private Navidrome playlists for IDs and access control.
+// Only decorate playlists Navidrome returned to this authenticated caller.
+func (f *subsonicFacade) handlePlaylistOverlays(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		f.proxy.ServeHTTP(w, r)
+		return
+	}
 	mix, published := loadDiscoveryMix()
+	overlays := append(loadImportedPlaylists(), discoveryOverlay(mix, published))
 	detail := subsonicEndpoint(r.URL.Path) == "getPlaylist"
-	if r.Method != http.MethodGet || mix.PlaylistID == "" || len(mix.Tracks) == 0 ||
-		(detail && r.URL.Query().Get("id") != mix.PlaylistID) {
+	requested := r.URL.Query().Get("id")
+	eligible := overlays[:0]
+	for _, overlay := range overlays {
+		if overlay.id != "" && len(overlay.rows) != 0 && (!detail || requested == overlay.id) {
+			eligible = append(eligible, overlay)
+		}
+	}
+	if len(eligible) == 0 {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
@@ -57,29 +142,16 @@ func (f *subsonicFacade) handleDiscoveryMix(w http.ResponseWriter, r *http.Reque
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
-
-	rows := make([]virtualSong, 0, len(mix.Tracks))
-	for _, track := range mix.Tracks {
-		id, err := strconv.ParseInt(track.ID, 10, 64)
-		if track.Source != catalogDeezer || err != nil || id <= 0 || track.Title == "" || track.Artists == "" {
-			continue
-		}
-		rows = append(rows, virtualSong{
-			RowID: track.rowID(), CoverID: track.coverID(), Title: track.Title,
-			Artist: track.Artists, Album: track.Album, HasCover: track.CoverURL != "",
-			Duration: track.Duration,
-		})
-	}
-	if len(rows) != 0 {
+	for _, overlay := range eligible {
 		var patched []byte
 		if strings.Contains(contentType, "json") {
-			patched = addDiscoveryMixJSON(body, mix.PlaylistID, detail, rows, published)
+			patched = addDiscoveryMixJSON(body, overlay.id, detail, overlay.rows, overlay.published)
 		} else {
-			patched = addDiscoveryMixXML(body, mix.PlaylistID, detail, rows, published)
+			patched = addDiscoveryMixXML(body, overlay.id, detail, overlay.rows, overlay.published)
 		}
 		if patched != nil {
 			if detail {
-				for _, track := range mix.Tracks {
+				for _, track := range overlay.catalog {
 					f.remember(track)
 				}
 			}
