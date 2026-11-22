@@ -903,18 +903,18 @@ func (f *subsonicFacade) handleGetCoverArt(w http.ResponseWriter, r *http.Reques
 
 	imageURL := f.coverURL(lookup)
 	if imageURL == "" {
-		writeSubsonicError(w, 70, "Cover art not found")
+		writeSubsonicError(w, r, 70, "Cover art not found")
 		return
 	}
 
 	resp, err := f.client.Get(imageURL)
 	if err != nil {
-		writeSubsonicError(w, 0, "cover fetch failed")
+		writeSubsonicError(w, r, 0, "cover fetch failed")
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		writeSubsonicError(w, 70, "Cover art not found")
+		writeSubsonicError(w, r, 70, "Cover art not found")
 		return
 	}
 
@@ -1039,7 +1039,7 @@ func (f *subsonicFacade) handleStar(w http.ResponseWriter, r *http.Request) {
 			// Navidrome is exactly that.
 			if err := f.acquire(spotifyID, func(p *pendingAcquisition) { p.Star = true }); err != nil {
 				log.Printf("subsonic facade: could not enqueue %s: %v", spotifyID, err)
-				writeSubsonicError(w, 0, "could not queue download")
+				writeSubsonicError(w, r, 0, "could not queue download")
 				return
 			}
 		} else {
@@ -1070,7 +1070,7 @@ func (f *subsonicFacade) handlePlaylist(w http.ResponseWriter, r *http.Request) 
 	for _, spotifyID := range virtual {
 		if err := f.acquire(spotifyID, nil); err != nil {
 			log.Printf("subsonic facade: could not enqueue %s: %v", spotifyID, err)
-			writeSubsonicError(w, 0, "could not queue download")
+			writeSubsonicError(w, r, 0, "could not queue download")
 			return
 		}
 	}
@@ -1082,7 +1082,7 @@ func (f *subsonicFacade) handlePlaylist(w http.ResponseWriter, r *http.Request) 
 	body, ct, err := f.forwardWithout(r, param, real)
 	if err != nil {
 		// The acquisition still happened; only the filing is lost.
-		writeSubsonicOK(w)
+		writeSubsonicOK(w, r)
 		return
 	}
 
@@ -1137,7 +1137,7 @@ func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 	if err := f.acquire(id, func(p *pendingAcquisition) { p.Star = true }); err != nil {
 		log.Printf("subsonic facade: could not enqueue %s: %v", id, err)
 	}
-	writeSubsonicError(w, 70, "Queued for download — it will appear in your library shortly")
+	writeSubsonicError(w, r, 70, "Queued for download — it will appear in your library shortly")
 }
 
 // -----------------------------------------------------------------------------
@@ -1411,12 +1411,12 @@ func splitVirtual(ids []string) (virtual, real []string) {
 // request still does what it says, and answers ok when nothing is left for it.
 func (f *subsonicFacade) forwardRemaining(w http.ResponseWriter, r *http.Request, param string, real []string) {
 	if len(real) == 0 {
-		writeSubsonicOK(w)
+		writeSubsonicOK(w, r)
 		return
 	}
 	body, ct, err := f.forwardWithout(r, param, real)
 	if err != nil {
-		writeSubsonicOK(w)
+		writeSubsonicOK(w, r)
 		return
 	}
 	writeRaw(w, ct, body)
@@ -1523,16 +1523,16 @@ func writeRaw(w http.ResponseWriter, contentType string, body []byte) {
 	_, _ = w.Write(body)
 }
 
-func writeSubsonicOK(w http.ResponseWriter) {
-	writeSubsonicResponse(w, map[string]any{
+func writeSubsonicOK(w http.ResponseWriter, r *http.Request) {
+	writeSubsonicResponse(w, r, map[string]any{
 		"status":  "ok",
 		"version": "1.16.1",
 		"type":    "navidrome",
 	})
 }
 
-func writeSubsonicError(w http.ResponseWriter, code int, message string) {
-	writeSubsonicResponse(w, map[string]any{
+func writeSubsonicError(w http.ResponseWriter, r *http.Request, code int, message string) {
+	writeSubsonicResponse(w, r, map[string]any{
 		"status":  "failed",
 		"version": "1.16.1",
 		"type":    "navidrome",
@@ -1542,10 +1542,33 @@ func writeSubsonicError(w http.ResponseWriter, code int, message string) {
 
 // Subsonic reports its own errors inside a 200 — an HTTP error status is for
 // transport failures, and a client that sees one may retry or go offline.
-func writeSubsonicResponse(w http.ResponseWriter, response map[string]any) {
-	w.Header().Set("Content-Type", "application/json")
+func writeSubsonicResponse(w http.ResponseWriter, r *http.Request, response map[string]any) {
+	if r.URL.Query().Get("f") == "json" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"subsonic-response": response})
+		return
+	}
+	type errorElement struct {
+		Code    int    `xml:"code,attr"`
+		Message string `xml:"message,attr"`
+	}
+	envelope := struct {
+		XMLName   xml.Name      `xml:"subsonic-response"`
+		Namespace string        `xml:"xmlns,attr"`
+		Status    string        `xml:"status,attr"`
+		Version   string        `xml:"version,attr"`
+		Type      string        `xml:"type,attr"`
+		Error     *errorElement `xml:"error,omitempty"`
+	}{Namespace: "http://subsonic.org/restapi", Status: fmt.Sprint(response["status"]), Version: "1.16.1", Type: "navidrome"}
+	if problem, ok := response["error"].(map[string]any); ok {
+		code, _ := problem["code"].(int)
+		envelope.Error = &errorElement{Code: code, Message: fmt.Sprint(problem["message"])}
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{"subsonic-response": response})
+	_, _ = io.WriteString(w, xml.Header)
+	_ = xml.NewEncoder(w).Encode(envelope)
 }
 
 func contains(haystack []string, needle string) bool {
