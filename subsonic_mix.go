@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type discoveryMix struct {
@@ -29,6 +30,10 @@ func (f *subsonicFacade) handleDiscoveryMix(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		f.proxy.ServeHTTP(w, r)
 		return
+	}
+	var published time.Time
+	if info, err := file.Stat(); err == nil {
+		published = info.ModTime()
 	}
 	var mix discoveryMix
 	err = json.NewDecoder(io.LimitReader(file, 256<<10)).Decode(&mix)
@@ -59,9 +64,9 @@ func (f *subsonicFacade) handleDiscoveryMix(w http.ResponseWriter, r *http.Reque
 	if len(rows) != 0 {
 		var patched []byte
 		if strings.Contains(contentType, "json") {
-			patched = addDiscoveryMixJSON(body, mix.PlaylistID, detail, rows)
+			patched = addDiscoveryMixJSON(body, mix.PlaylistID, detail, rows, published)
 		} else {
-			patched = addDiscoveryMixXML(body, mix.PlaylistID, detail, rows)
+			patched = addDiscoveryMixXML(body, mix.PlaylistID, detail, rows, published)
 		}
 		if patched != nil {
 			if detail {
@@ -75,7 +80,7 @@ func (f *subsonicFacade) handleDiscoveryMix(w http.ResponseWriter, r *http.Reque
 	writeRaw(w, contentType, body)
 }
 
-func addDiscoveryMixJSON(body []byte, id string, detail bool, rows []virtualSong) []byte {
+func addDiscoveryMixJSON(body []byte, id string, detail bool, rows []virtualSong, published time.Time) []byte {
 	var envelope map[string]any
 	if json.Unmarshal(body, &envelope) != nil {
 		return nil
@@ -100,6 +105,10 @@ func addDiscoveryMixJSON(body []byte, id string, detail bool, rows []virtualSong
 		duration, _ := playlist["duration"].(float64)
 		playlist["songCount"] = int(count) + len(rows)
 		playlist["duration"] = int(duration) + mixDuration(rows)
+		changed, _ := playlist["changed"].(string)
+		if value := newerMixDate(changed, published); value != "" {
+			playlist["changed"] = value
+		}
 		if detail {
 			entries, _ := playlist["entry"].([]any)
 			for _, row := range rows {
@@ -113,7 +122,7 @@ func addDiscoveryMixJSON(body []byte, id string, detail bool, rows []virtualSong
 	return nil
 }
 
-func addDiscoveryMixXML(body []byte, id string, detail bool, rows []virtualSong) []byte {
+func addDiscoveryMixXML(body []byte, id string, detail bool, rows []virtualSong, published time.Time) []byte {
 	decoder := xml.NewDecoder(bytes.NewReader(body))
 	for {
 		offset := decoder.InputOffset()
@@ -143,8 +152,10 @@ func addDiscoveryMixXML(body []byte, id string, detail bool, rows []virtualSong)
 			Attrs   []xml.Attr `xml:",any,attr"`
 			Entries string     `xml:",innerxml"`
 		}{}
+		changed := newerMixDate(attrs["changed"], published)
 		for _, attr := range start.Attr {
-			if attr.Name.Local != "songCount" && attr.Name.Local != "duration" {
+			if attr.Name.Local != "songCount" && attr.Name.Local != "duration" &&
+				(attr.Name.Local != "changed" || changed == "") {
 				patch.Attrs = append(patch.Attrs, attr)
 			}
 		}
@@ -152,6 +163,9 @@ func addDiscoveryMixXML(body []byte, id string, detail bool, rows []virtualSong)
 			xml.Attr{Name: xml.Name{Local: "songCount"}, Value: strconv.Itoa(count + len(rows))},
 			xml.Attr{Name: xml.Name{Local: "duration"}, Value: strconv.Itoa(duration + mixDuration(rows))},
 		)
+		if changed != "" {
+			patch.Attrs = append(patch.Attrs, xml.Attr{Name: xml.Name{Local: "changed"}, Value: changed})
+		}
 		if detail {
 			var entries strings.Builder
 			for _, row := range rows {
@@ -181,4 +195,13 @@ func mixDuration(rows []virtualSong) int {
 		total += row.Duration
 	}
 	return total
+}
+
+// Clients use the playlist's changed timestamp to invalidate their cache.
+func newerMixDate(current string, published time.Time) string {
+	changed, _ := time.Parse(time.RFC3339Nano, current)
+	if published.After(changed) {
+		return published.UTC().Format(time.RFC3339Nano)
+	}
+	return ""
 }
