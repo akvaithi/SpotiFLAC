@@ -51,10 +51,50 @@ job fails visibly. The final FLAC identity check remains mandatory.
 9. Verify playback, XML and JSON search, authentication, acquisition, source
    verification and the resulting Navidrome row. Update the dashboard catalog.
 
-Arpeggi keeps its current public music URL and Navidrome credentials. Search for
-a track; favourite its download row to queue it. Downloads do not turn a virtual
-row into instant playback. Once Navidrome indexes the real file, refresh the
-library and play the normal row.
+Arpeggi uses the existing public music URL and Navidrome credentials. Tap a
+download row to queue it without favoriting. The facade waits up to 12 seconds
+and starts playback if Navidrome has indexed the file. If the source needs more
+time or CAPTCHA, the job continues and the track can be played from the library
+after it appears. See [the Subsonic facade](../SUBSONIC-FACADE.md#55-stream-and-download-on-a-virtual-row).
+
+The dashboard's playlist backfill uses the scoped bearer token accepted by
+`POST /api/playlist-backfill`. Submit a public Spotify playlist link with
+`queue: false` for a read-only preview, then `queue: true` to request a bounded
+batch of missing tracks. The endpoint skips library matches and active queue
+entries. It does not create or sync a Navidrome playlist.
+
+## Troubleshooting
+
+The gateway's root health response checks the HTTP service. Test a real
+acquisition to confirm the Chromium verification window opens. If the job says
+`Verification browser did not become ready` after a container recreation:
+
+1. Verify the remote Chromium desktop responds and the dedicated browser's
+   DevTools endpoint on container loopback port 9223 is unavailable.
+2. Check whether `/config/doubledouble/profile/SingletonLock` names a previous
+   container hostname. If it does, identify any stranded Chromium child with
+   that exact profile path and stop that child while the source queue is idle.
+3. Once the profile is idle, move the stale `SingletonLock`, `SingletonCookie`
+   and `SingletonSocket` symlinks into a backup directory. Leave browser profile
+   data in place.
+4. Retry an exact track request. After this recovery, a test reached DoubleDouble's
+   normal CAPTCHA prompt in about 2.5 seconds with Pixeldrain disabled. That
+   measurement ended at the prompt.
+
+## Provider trials, November 2026
+
+- Monochrome had the fastest successful catalog search in the server test. Its
+  audio backend was unreachable for the sample.
+- Jumo-DL's track search returned HTTP 403. Cyan-DL completed a sample archive
+  in 2.4–6.3 seconds after the archive action, but its FLAC request failed.
+  The fallback file was Opus.
+- The official Mornye Desktop 5.4.0 Linux package launched its graphical runtime
+  for `--help` and aborted under the server's virtual display. Its Linux
+  launcher has no download subcommand. The separate
+  [Mornye Python CLI](https://github.com/mornyeapp/Mornye-Python) 2.2.2 ran in an
+  isolated environment. The tested Deezer, Qobuz, Tidal and Amazon extensions
+  encountered verification or catalog failures. None produced a sample FLAC.
+  These tests did not establish a faster lossless source.
 
 ## Rollback
 

@@ -18,7 +18,10 @@ Arun requested restoration of Arpeggi acquisition using us.doubledouble.top.
 - The music listener on port 4533 fronts Navidrome. Only /rest/ is intercepted;
   its web interface and native API pass through. Navidrome stays at container port
   4533 and host loopback port 4534. The tunnel configuration stays unchanged. Keep the dashboard catalog in sync.
-- See doubledouble-gateway/README.md for the current deployment and rollback.
+- Tap a virtual row to queue without favoriting. The facade waits up to 12 seconds
+  for Navidrome to index the track. The durable queue continues after that wait.
+- See doubledouble-gateway/README.md for the current deployment, recovery,
+  provider trials and rollback.
 
 
 DoubleDouble currently reports only Amazon Music as working. The adapter maps the

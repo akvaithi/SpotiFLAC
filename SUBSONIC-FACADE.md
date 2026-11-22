@@ -6,6 +6,13 @@ Search → favourite → FLAC on the server → indexed by Navidrome → the fav
 applied to the real track.
 **Date:** 2026-07-31
 
+**Deployment update, November 22, 2026.** Arpeggi is the active client. Search
+injects Deezer catalog rows with the `sf-dz:` prefix. Older `sf:` Spotify IDs
+can still be played or acquired. DoubleDouble is the active download source.
+See [the source adapter guide](doubledouble-gateway/README.md) for the current
+deployment and source tests. The design below records the original rollout.
+Section 5.5 describes current playback.
+
 Injection is opt-in: `SUBSONIC_FACADE=inject`. Unset is a pure reverse proxy, which is
 what any new deployment should run first — if the pass-through is not invisible,
 nothing built on top of it matters.
@@ -416,21 +423,25 @@ what the user sees while waiting, which is why an in-flight row stays visible as
 reconciliation poll, which sleeps 10s between attempts — worth at most 10s of a
 two-minute wait, and not worth tightening.
 
-### 5.5 `stream` — the graceful failure
+### 5.5 `stream` and `download` on a virtual row
 
-`stream?id=sf:...` means the user pressed Play on a virtual row.
+Authenticated calls for virtual song IDs queue one durable acquisition without
+creating a favorite. The facade waits up to 12 seconds for the download and its
+Navidrome index entry. Once the song is available, it rewrites the ID and
+proxies the original request, preserving byte ranges and format options.
+A request that outlives the wait returns Subsonic error 70 and leaves the job
+running. The user can replay the track from the library after indexing.
+Explicit favorite and playlist actions retain their acquisition behavior.
 
-The facade enqueues the download (idempotently — a second request for an id already
-queued is a no-op) and returns Subsonic **error 70, "data not found"**. Cassette
-surfaces this as a playback error.
+For a completed job, the facade looks for the exact path relative to the shared
+music directory. If the sorter moved that file, it looks for a unique match on
+title, artist and album, requiring the ISRC when the queue record has one.
+Ordinary Navidrome IDs are proxied directly.
 
-**Blocking the stream until the file exists is explicitly rejected.** It is the
-seductive option — "press play and it just appears" — and it does not work:
-`CustomHeadersTransport` sets `timeoutIntervalForRequest = 30` and
-`timeoutIntervalForResource = 30`, while a download is 5–13s of `@deezload2bot`
-latency plus transfer plus tagging. It would succeed often enough to look correct and
-fail often enough to be untrustworthy, which is the worst of both. The measured
-latency profile is in `CLAUDE.md`; nothing about it has changed.
+Verified public authenticated search in XML and JSON, artwork and normal
+byte-range playback. A previously acquired virtual row returned the same audio
+bytes after the sorter moved the file and preserved its favorite state. A fresh
+download started from the iPhone player has not been timed.
 
 ---
 
@@ -674,7 +685,7 @@ Each phase is independently verifiable on the shipped app.
 | **3** | `star` / `unstar` trigger — **built** | Add to Favorites on a `↓` row → item appears in `GetQueue` → FLAC on disk → track is in Artists/Albums/Songs. |
 | **4** | Post-download reconciliation: star the real track — **done** | Confirmed on *Hair Salon*: `starred=2026-07-31T13:53:52Z` on the real track, 5s after Navidrome imported it. |
 | **5** | `updatePlaylist` / `createPlaylist` + destination table — **built, not exercised through a client** | Add to Playlist on a `↓` row acquires *and* lands in the chosen playlist after the rescan. |
-| **6** | `stream` intercept — **done** | Pressing play on a `↓` row enqueues and errors cleanly rather than hanging. |
+| **6** | `stream` intercept — **done** | Pressing play queues without favoriting and waits briefly for playback. A slow acquisition continues in the background. |
 | **7** | Other clients — **done** | Amperfy and Arpeggi verified after the three fixes in §3.1. |
 
 All of this is deployed. Phase 1 is the load-bearing one and should sit in production before
