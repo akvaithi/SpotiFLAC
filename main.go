@@ -70,6 +70,7 @@ func main() {
 	mux.HandleFunc("/api/events", requireAPIToken(handleEvents))
 	mux.HandleFunc("/api/server-info", handleServerInfo)
 	mux.HandleFunc("/api/file", requireAPIToken(handleFileDownload))
+	mux.HandleFunc("/api/playlist-backfill", playlistBackfillHandler(app))
 
 	// The Subsonic facade is deliberately NOT behind requireAPIToken: a
 	// Subsonic client can't send a SpotiFLAC bearer token, and /rest/* carries
