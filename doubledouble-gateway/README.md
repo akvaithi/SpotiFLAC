@@ -22,6 +22,13 @@ The source must return real FLAC audio or a safe ZIP containing exactly one FLAC
 The downloader compares the original ISRC, or its title and artist, before
 retagging. Different recordings are errors, never silently relabelled.
 
+
+DoubleDouble currently reports only Amazon Music as working. The adapter maps the
+exact Deezer recording to its Amazon Music track through song.link's public track
+page, checks that the page identifies the requested Deezer ID, and rejects album-only
+links. It never substitutes a text-search result. If no exact mapping exists, the
+job fails visibly. The final FLAC identity check remains mandatory.
+
 ## Deployment
 
 1. Push this repository and wait for its container build to succeed.

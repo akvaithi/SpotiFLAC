@@ -19,6 +19,13 @@ Arun requested restoration of Arpeggi acquisition using us.doubledouble.top.
   interface remains the default route. Keep the dashboard catalog in sync.
 - See doubledouble-gateway/README.md for the current deployment and rollback.
 
+
+DoubleDouble currently reports only Amazon Music as working. The adapter maps the
+exact Deezer recording to its Amazon Music track through song.link's public track
+page, checks that the page identifies the requested Deezer ID, and rejects album-only
+links. It never substitutes a text-search result. If no exact mapping exists, the
+job fails visibly. The final FLAC identity check remains mandatory.
+
 ## Historical implementation notes
 
 # CLAUDE.md — working in this repo

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import queue
+import re
 import signal
 import shutil
 import subprocess
@@ -104,6 +105,40 @@ def extract_flac(archive_path, output):
         return tracks[0].filename
 
 
+def amazon_link(page, track_id):
+    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page, re.S)
+    if not match:
+        raise ValueError('Exact track link mapping is unavailable')
+    data = json.loads(match.group(1))['props']['pageProps']['pageData']
+    entity = data.get('entityData', {})
+    if entity.get('provider') != 'deezer' or entity.get('type') != 'song' or str(entity.get('id')) != track_id:
+        raise ValueError('Link mapping does not identify the requested Deezer recording')
+    for section in data.get('sections', []):
+        for link in section.get('links', []):
+            if link.get('platform') != 'amazonMusic':
+                continue
+            parsed = urllib.parse.urlsplit(link.get('url', ''))
+            if parsed.scheme != 'https' or parsed.netloc != 'music.amazon.com':
+                continue
+            asin = urllib.parse.parse_qs(parsed.query).get('trackAsin', [''])[0]
+            direct = re.fullmatch(r'/tracks/(B[A-Z0-9]{9})/?', parsed.path)
+            album_track = re.fullmatch(r'/albums/[A-Z0-9]{10}/(B[A-Z0-9]{9})/?', parsed.path)
+            if direct or album_track:
+                asin = (direct or album_track).group(1)
+            if re.fullmatch(r'B[A-Z0-9]{9}', asin):
+                return 'https://music.amazon.com/tracks/' + asin + '?musicTerritory=US'
+    raise ValueError('No exact Amazon Music track link is available for this recording')
+
+
+def resolve_source(url):
+    track_id = urllib.parse.urlsplit(url).path.removeprefix('/track/')
+    # The public track page is already the legacy app's link-mapping source.
+    # It identifies the recording by Deezer ID; no text search or guessed match.
+    with urllib.request.urlopen('https://song.link/d/' + track_id + '?country=US', timeout=30) as response:
+        page = response.read(4*1024*1024).decode('utf-8')
+    return amazon_link(page, track_id)
+
+
 class Browser:
     def __init__(self):
         from websockets.sync.client import connect
@@ -167,8 +202,10 @@ def process(job):
     browser = None
     try:
         update(job, state='resolving')
+        source = resolve_source(job['url'])
+        update(job, message='Downloading the exact Amazon Music recording through DoubleDouble')
         browser = Browser()
-        browser.command('Page.navigate', {'url': ORIGIN + '/?url=' + urllib.parse.quote(job['url'], safe='')})
+        browser.command('Page.navigate', {'url': ORIGIN + '/?url=' + urllib.parse.quote(source, safe='')})
         for _ in range(90):
             if browser.evaluate("document.readyState === 'complete' && !!document.getElementById('dl-button') && typeof dl === 'function'"):
                 break

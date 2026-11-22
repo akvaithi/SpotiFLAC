@@ -35,6 +35,13 @@ session between downloads, subject to the site's own expiry rules.
 See [the current deployment guide](doubledouble-gateway/README.md) for server setup,
 verification and rollback. Older setup documents describe the retired deployment.
 
+
+DoubleDouble currently reports only Amazon Music as working. The adapter maps the
+exact Deezer recording to its Amazon Music track through song.link's public track
+page, checks that the page identifies the requested Deezer ID, and rejects album-only
+links. It never substitutes a text-search result. If no exact mapping exists, the
+job fails visibly. The final FLAC identity check remains mandatory.
+
 ## Disclaimer
 
 This project is for **personal, self-hosted use**. It is not affiliated with,

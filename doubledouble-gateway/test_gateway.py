@@ -1,10 +1,11 @@
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
 import zipfile
 
-from gateway import BOOTSTRAP, direct_url, extract_flac
+from gateway import amazon_link, direct_url, extract_flac
 
 
 class Downloads(unittest.TestCase):
@@ -13,6 +14,20 @@ class Downloads(unittest.TestCase):
         for value in ['https://pixeldrain.com/u/abc', '//evil.example/a', 'http://us.doubledouble.top/a', 'https://us.doubledouble.top@evil.example/a']:
             with self.assertRaises(ValueError):
                 direct_url(value)
+
+    def test_exact_amazon_mapping_requires_the_requested_track(self):
+        data = {'props': {'pageProps': {'pageData': {
+            'entityData': {'provider':'deezer','type':'song','id':'123'},
+            'sections': [{'links':[{'platform':'amazonMusic','url':'https://music.amazon.com/albums/B00WO1YR7K?trackAsin=B00WO1YUQS'}]}]
+        }}}}
+        page = '<script id="__NEXT_DATA__" type="application/json">' + json.dumps(data) + '</script>'
+        self.assertEqual(amazon_link(page, '123'), 'https://music.amazon.com/tracks/B00WO1YUQS?musicTerritory=US')
+        with self.assertRaises(ValueError):
+            amazon_link(page, '456')
+        data['props']['pageProps']['pageData']['sections'][0]['links'][0]['url'] = 'https://music.amazon.com/albums/B00WO1YR7K'
+        page = '<script id="__NEXT_DATA__">' + json.dumps(data) + '</script>'
+        with self.assertRaises(ValueError):
+            amazon_link(page, '123')
 
     def archive(self, entries):
         buf = io.BytesIO()
