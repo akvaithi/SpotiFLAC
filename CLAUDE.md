@@ -15,8 +15,9 @@ Arun requested restoration of Arpeggi acquisition using us.doubledouble.top.
 - The service uses /srv/media/Music and /srv/fast/apps/SpotiFLAC/config on akvcloud.
 - Read Navidrome and SpotiFLAC API credentials from the Mac Keychain at deploy time;
   pass them to compose through its process environment, never through a committed file.
-- The public music hostname routes only /rest/ through SpotiFLAC; the Navidrome web
-  interface remains the default route. Keep the dashboard catalog in sync.
+- The music listener on port 4533 fronts Navidrome. Only /rest/ is intercepted;
+  its web interface and native API pass through. Navidrome stays at container port
+  4533 and host loopback port 4534. The tunnel configuration stays unchanged. Keep the dashboard catalog in sync.
 - See doubledouble-gateway/README.md for the current deployment and rollback.
 
 

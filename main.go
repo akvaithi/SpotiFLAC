@@ -88,6 +88,20 @@ func main() {
 		IdleTimeout: 5 * time.Minute,
 	}
 
+	// A separate music listener fronts the complete Navidrome service. Its web
+	// API and UI pass through unchanged; only /rest/ uses acquisition interception.
+	// The admin/RPC listener remains bound to host loopback by compose.
+	var music *http.Server
+	if musicAddr := os.Getenv("MUSIC_ADDR"); musicAddr != "" && facade != nil {
+		music = &http.Server{Addr: musicAddr, Handler: musicHandler(facade), ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 5 * time.Minute}
+		go func() {
+			log.Printf("Music proxy listening on %s", musicAddr)
+			if err := music.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("music listener: %v", err)
+			}
+		}()
+	}
+
 	go func() {
 		log.Printf("SpotiFLAC web listening on %s  (downloads -> %s)", addr, downloadDir)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -102,6 +116,16 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
+	if music != nil {
+		_ = music.Shutdown(ctx)
+	}
+}
+
+func musicHandler(f *subsonicFacade) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/rest/", f)
+	mux.Handle("/", f.proxy)
+	return mux
 }
 
 func envOr(key, def string) string {

@@ -6,11 +6,13 @@ services:
     user: "1000:1000"
     ports:
       - "127.0.0.1:8080:8080"
+      - "${SPOTIFLAC_MUSIC_BIND:-0.0.0.0:4533}:8081"
     volumes:
       - /srv/media/Music:/downloads
       - ./config:/config
     environment:
       ADDR: :8080
+      MUSIC_ADDR: :8081
       DOWNLOAD_DIR: /downloads
       CONFIG_DIR: /config
       DOUBLEDOUBLE_GATEWAY_URL: http://chromium:8782

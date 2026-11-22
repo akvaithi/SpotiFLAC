@@ -42,12 +42,14 @@ job fails visibly. The final FLAC identity check remains mandatory.
    navidrome_default; its HTTP port is bound to host loopback.
 6. Seed ScanLibrary with /downloads so owned tracks are filtered from acquisition
    search results. Library scanning reads tags and does not alter music files.
-7. Back up the cloudflared config. Add an ingress rule for music.akvaithi.page
-   with path ^/rest/ and service http://localhost:8080 before its existing rule.
-   Keep the existing default rule pointing at Navidrome on port 4533.
-8. Validate tunnel ingress and reload its config. Confirm normal playback, XML
-   and JSON search, authentication, acquisition, source verification and the
-   resulting Navidrome row. Update the akvcloud dashboard catalog.
+7. First set SPOTIFLAC_MUSIC_BIND to 127.0.0.1:14533 for pilot checks. Test the
+   complete Navidrome web interface and Subsonic API through that listener.
+8. Back up the Navidrome compose file. Move its host binding from port 4533
+   to 127.0.0.1:4534, leaving the container port and music/data mounts unchanged.
+   Then recreate SpotiFLAC with SPOTIFLAC_MUSIC_BIND=0.0.0.0:4533. The tunnel and
+   Arpeggi URL remain unchanged. Only the music service is briefly interrupted.
+9. Verify playback, XML and JSON search, authentication, acquisition, source
+   verification and the resulting Navidrome row. Update the dashboard catalog.
 
 Arpeggi keeps its current public music URL and Navidrome credentials. Search for
 a track; favourite its download row to queue it. Downloads do not turn a virtual
@@ -56,8 +58,8 @@ library and play the normal row.
 
 ## Rollback
 
-Restore the tunnel config backup to route every request directly to Navidrome.
-Stop the SpotiFLAC container and doubledouble-browser.service. Existing music
+Stop the SpotiFLAC container, restore Navidrome's compose backup and recreate
+Navidrome on its original host port 4533. Stop doubledouble-browser.service. Existing music
 and the original Navidrome database remain in place.
 
 ## Checks
