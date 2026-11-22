@@ -68,6 +68,15 @@ def resolve(track):
     }
 
 
+def resolve_available(track):
+    try:
+        return resolve(track)
+    except (OSError, ValueError, KeyError):
+        # A recording can disappear from a regional catalog between search
+        # and lookup. The rest of the mix can still be published.
+        return None
+
+
 def build():
     account = os.environ["LISTENBRAINZ_USER"]
     playlist_id = os.environ["NAVIDROME_DISCOVERY_PLAYLIST_ID"]
@@ -103,7 +112,7 @@ def build():
 
     resolved = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-        for row in pool.map(resolve, candidates):
+        for row in pool.map(resolve_available, candidates):
             if row and (normalized(row["title"]), primary(row["artists"])) not in local_keys:
                 resolved.setdefault(row["isrc"] or row["id"], row)
     tracks = list(resolved.values())[:30]
