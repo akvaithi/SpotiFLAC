@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -98,7 +100,8 @@ type subsonicFacade struct {
 	inject bool
 	debug  bool
 
-	mu sync.Mutex
+	mu        sync.Mutex
+	acquireMu sync.Mutex
 	// spotifyID -> the search hit it came from, so getCoverArt and the
 	// enqueue both cost no second round trip. Bounded; oldest evicted first.
 	seen      map[string]catalogTrack
@@ -1037,7 +1040,7 @@ func (f *subsonicFacade) handleStar(w http.ResponseWriter, r *http.Request) {
 			// "Add to Favorites" on a ↓ row is the user saying: put this in my
 			// library. The file landing in /downloads and being indexed by
 			// Navidrome is exactly that.
-			if err := f.acquire(spotifyID, func(p *pendingAcquisition) { p.Star = true }); err != nil {
+			if err := f.acquire(r.Context(), spotifyID, func(p *pendingAcquisition) { p.Star = true }); err != nil {
 				log.Printf("subsonic facade: could not enqueue %s: %v", spotifyID, err)
 				writeSubsonicError(w, r, 0, "could not queue download")
 				return
@@ -1068,7 +1071,7 @@ func (f *subsonicFacade) handlePlaylist(w http.ResponseWriter, r *http.Request) 
 	}
 
 	for _, spotifyID := range virtual {
-		if err := f.acquire(spotifyID, nil); err != nil {
+		if err := f.acquire(r.Context(), spotifyID, func(*pendingAcquisition) {}); err != nil {
 			log.Printf("subsonic facade: could not enqueue %s: %v", spotifyID, err)
 			writeSubsonicError(w, r, 0, "could not queue download")
 			return
@@ -1129,15 +1132,106 @@ func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Blocking until the file exists is the tempting version and it does not
-	// work: the client's transports time out at 30s while a download is tens of
-	// seconds of bot latency plus transfer plus tagging. It would succeed often
-	// enough to look correct and fail often enough to be untrustworthy. Enqueue
-	// and say so instead.
-	if err := f.acquire(id, func(p *pendingAcquisition) { p.Star = true }); err != nil {
-		log.Printf("subsonic facade: could not enqueue %s: %v", id, err)
+	if r.Method == http.MethodHead {
+		f.proxy.ServeHTTP(w, r)
+		return
 	}
-	writeSubsonicError(w, r, 70, "Queued for download — it will appear in your library shortly")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	if err := f.acquire(ctx, id, nil); err != nil {
+		log.Printf("subsonic facade: could not enqueue %s: %v", id, err)
+		writeSubsonicError(w, r, 0, "Could not queue download")
+		return
+	}
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for ctx.Err() == nil {
+		rec := playbackQueueRecord(id)
+		switch rec.Status {
+		case backend.QueueCompleted:
+			if songID := f.indexedDownload(r.Clone(ctx), rec); songID != "" {
+				proxied := r.Clone(r.Context())
+				q := proxied.URL.Query()
+				q.Set("id", songID)
+				proxied.URL.RawQuery = q.Encode()
+				f.proxy.ServeHTTP(w, proxied)
+				return
+			}
+		case backend.QueueFailed, backend.QueueCancelled:
+			writeSubsonicError(w, r, 70, "Download did not finish. Tap to retry.")
+			return
+		}
+
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+		}
+	}
+
+	if r.Context().Err() == nil {
+		writeSubsonicError(w, r, 70, "Download is still processing. Tap again once it appears in your library.")
+	}
+}
+
+func playbackQueueRecord(rowID string) backend.QueueRecord {
+	records, err := backend.GetQueueRecords()
+	if err != nil {
+		return backend.QueueRecord{}
+	}
+	for i := len(records) - 1; i >= 0; i-- {
+		rec := records[i]
+		if (rec.DeezerID != "" && deezerIDPrefix+rec.DeezerID == rowID) ||
+			(rec.SpotifyID != "" && virtualIDPrefix+rec.SpotifyID == rowID) {
+			return rec
+		}
+	}
+	return backend.QueueRecord{}
+}
+
+func (f *subsonicFacade) indexedDownload(r *http.Request, rec backend.QueueRecord) string {
+	// Both containers mount the same music directory at different paths.
+	// Compare its relative path so a different release or remix cannot play.
+	relative, err := filepath.Rel(serverDownloadDir(), rec.FilePath)
+	if err != nil || !filepath.IsLocal(relative) || relative == "." {
+		return ""
+	}
+
+	search := r.Clone(r.Context())
+	search.URL.Path = "/rest/search3.view"
+	q := search.URL.Query()
+	for _, key := range []string{"id", "format", "maxBitRate", "timeOffset", "estimatedContentLength", "albumOffset", "artistOffset", "songOffset"} {
+		q.Del(key)
+	}
+	q.Set("query", rec.TrackName)
+	q.Set("songCount", "50")
+	q.Set("artistCount", "0")
+	q.Set("albumCount", "0")
+	q.Set("f", "json")
+	search.URL.RawQuery = q.Encode()
+
+	body, _, err := f.forward(search)
+	if err != nil {
+		return ""
+	}
+	var payload struct {
+		Response struct {
+			SearchResult3 struct {
+				Songs []struct{ ID, Path string } `json:"song"`
+			} `json:"searchResult3"`
+		} `json:"subsonic-response"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return ""
+	}
+	for _, song := range payload.Response.SearchResult3.Songs {
+		if song.Path == filepath.ToSlash(relative) {
+			return song.ID
+		}
+	}
+	return ""
 }
 
 // -----------------------------------------------------------------------------
@@ -1151,37 +1245,34 @@ func (f *subsonicFacade) handleStream(w http.ResponseWriter, r *http.Request) {
 // rowID carries its own catalog, so a Deezer row enqueues with an exact source
 // id — no link resolution at all — while a Spotify row from a client's cache
 // still resolves the old way.
-func (f *subsonicFacade) acquire(rowID string, note func(*pendingAcquisition)) error {
-	f.mu.Lock()
-	existing := f.pending[rowID]
-	f.mu.Unlock()
-
-	if existing != nil {
-		if note != nil {
-			f.mu.Lock()
-			note(existing)
-			f.mu.Unlock()
-		}
+func (f *subsonicFacade) acquire(ctx context.Context, rowID string, note func(*pendingAcquisition)) error {
+	if note == nil && isAcquiredOrQueued(playbackQueueRecord(rowID)) {
 		return nil
 	}
-
-	meta, err := f.trackMetadata(rowID)
+	meta, err := f.trackMetadata(ctx, rowID)
 	if err != nil {
 		return err
 	}
 
-	p := &pendingAcquisition{RowID: rowID, Title: meta.Title, Artist: meta.Artists}
-	if note != nil {
-		note(p)
+	f.acquireMu.Lock()
+	defer f.acquireMu.Unlock()
+
+	alreadyQueued := isAcquiredOrQueued(playbackQueueRecord(rowID))
+	if alreadyQueued && note == nil {
+		return nil
 	}
 
-	f.mu.Lock()
-	f.pending[rowID] = p
-	f.mu.Unlock()
-
-	// Already fetched or already fetching: the promise above is recorded, but
-	// there is nothing new to enqueue.
-	if f.acquisitionStates()[rowID] != "" {
+	if note != nil {
+		f.mu.Lock()
+		p := f.pending[rowID]
+		if p == nil {
+			p = &pendingAcquisition{RowID: rowID, Title: meta.Title, Artist: meta.Artists}
+			f.pending[rowID] = p
+		}
+		note(p)
+		f.mu.Unlock()
+	}
+	if alreadyQueued {
 		return nil
 	}
 
@@ -1216,6 +1307,14 @@ func (f *subsonicFacade) acquire(rowID string, note func(*pendingAcquisition)) e
 	return err
 }
 
+func isAcquiredOrQueued(rec backend.QueueRecord) bool {
+	if rec.Status == backend.QueueCompleted {
+		_, err := os.Stat(rec.FilePath)
+		return err == nil
+	}
+	return rec.Status == backend.QueueQueued || rec.Status == backend.QueueDownloading
+}
+
 func (f *subsonicFacade) cancelPending(rowID string) {
 	f.mu.Lock()
 	delete(f.pending, rowID)
@@ -1229,7 +1328,7 @@ func (f *subsonicFacade) cancelPending(rowID string) {
 //
 // The fetch is per-catalog, and a Spotify row can still arrive years after the
 // switch from a client's cache, which is why that path stays.
-func (f *subsonicFacade) trackMetadata(rowID string) (catalogTrack, error) {
+func (f *subsonicFacade) trackMetadata(ctx context.Context, rowID string) (catalogTrack, error) {
 	if t, ok := f.recall(rowID); ok {
 		return t, nil
 	}
@@ -1239,7 +1338,7 @@ func (f *subsonicFacade) trackMetadata(rowID string) (catalogTrack, error) {
 		return catalogTrack{}, fmt.Errorf("unrecognised row id %q", rowID)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	if source == catalogDeezer {
