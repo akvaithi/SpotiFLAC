@@ -166,18 +166,31 @@ class Browser:
         self.connection = connect(page['webSocketDebuggerUrl'], max_size=4*1024*1024)
         self.socket = self.connection.__enter__()
         self.sequence = 0
+        self.responses = {}
         self.command('Page.enable')
         self.script = self.command('Page.addScriptToEvaluateOnNewDocument', {'source': BOOTSTRAP})['identifier']
 
     def command(self, method, params=None):
         self.sequence += 1
-        self.socket.send(json.dumps({'id': self.sequence, 'method': method, 'params': params or {}}))
+        expected = self.sequence
+        self.socket.send(json.dumps({'id': expected, 'method': method, 'params': params or {}}))
         while True:
-            response = json.loads(self.socket.recv(timeout=30))
-            if response.get('id') == self.sequence:
+            if expected in self.responses:
+                response = self.responses.pop(expected)
                 if 'error' in response:
                     raise RuntimeError('Verification browser command failed')
                 return response.get('result', {})
+            response = json.loads(self.socket.recv(timeout=30))
+            if 'id' in response:
+                self.responses[response['id']] = response
+            elif response.get('method') == 'Fetch.requestPaused':
+                request = response['params']
+                try:
+                    direct_url(request['request']['url'])
+                except ValueError:
+                    self.command('Fetch.failRequest', {'requestId': request['requestId'], 'errorReason': 'BlockedByClient'})
+                    raise ValueError('Refusing an external download redirect')
+                self.command('Fetch.continueRequest', {'requestId': request['requestId']})
 
     def evaluate(self, expression):
         result = self.command('Runtime.evaluate', {'expression': expression, 'returnByValue': True})
@@ -187,6 +200,7 @@ class Browser:
 
     def close(self):
         try:
+            self.command('Fetch.disable')
             self.command('Page.removeScriptToEvaluateOnNewDocument', {'identifier': self.script})
             self.command('Page.navigate', {'url': 'about:blank'})
         finally:
@@ -225,7 +239,7 @@ def process(job):
                 if not status.get('url'):
                     raise RuntimeError('DoubleDouble supplied no download URL')
                 update(job, state='downloading')
-                fetch_result(job, url)
+                fetch_result(job, url, browser)
                 return
             if status.get('status') == 'error':
                 raise RuntimeError(status.get('message') or 'DoubleDouble download failed')
@@ -247,27 +261,37 @@ def process(job):
                 pass
 
 
-def fetch_result(job, url):
+def fetch_result(job, url, browser):
     folder = HOME / 'jobs' / job['id']
-    folder.mkdir(parents=True, exist_ok=True)
-    raw = folder / 'download.part'
+    downloads = folder / 'incoming'
+    downloads.mkdir(parents=True, exist_ok=True)
     output = folder / 'track.flac'
-    opener = urllib.request.build_opener(DirectRedirect())
+    # Use the same browser's native download, with its ordinary session and
+    # verification state. An HTTP client may be refused even after page success.
+    browser.command('Browser.setDownloadBehavior', {'behavior': 'allow', 'downloadPath': str(downloads)})
+    browser.command('Fetch.enable', {'patterns': [{'urlPattern': '*', 'resourceType': 'Document', 'requestStage': 'Request'}]})
+    browser.command('Page.navigate', {'url': direct_url(url)})
+    raw = None
     try:
-        with opener.open(direct_url(url), timeout=120) as source, raw.open('wb') as target:
-            size = int(source.headers.get('Content-Length', 0))
-            if size > LIMIT:
+        deadline = time.monotonic() + 5*60
+        while time.monotonic() < deadline:
+            if job['cancel'].is_set():
+                raise RuntimeError('Download cancelled')
+            # Drain browser protocol events, including same-origin redirect gates.
+            browser.evaluate('document.readyState')
+            files = [p for p in downloads.iterdir() if p.is_file() and not p.is_symlink()]
+            received = sum(p.stat().st_size for p in files)
+            if received > LIMIT:
                 raise ValueError('Download exceeds single-track size limit')
-            update(job, size=size)
-            received = 0
-            while chunk := source.read(1024*1024):
-                if job['cancel'].is_set():
-                    raise RuntimeError('Download cancelled')
-                received += len(chunk)
-                if received > LIMIT:
-                    raise ValueError('Download exceeds single-track size limit')
-                target.write(chunk)
-                update(job, downloaded=received/(1024*1024))
+            update(job, downloaded=received/(1024*1024))
+            if files and not any(p.name.endswith(('.crdownload', '.tmp')) for p in files):
+                if len(files) != 1:
+                    raise ValueError('Expected a single direct download')
+                raw = files[0]
+                break
+            time.sleep(1)
+        if raw is None:
+            raise ValueError('Direct download did not finish in server Chromium')
         with raw.open('rb') as stream:
             magic = stream.read(4)
         if magic == b'fLaC':
@@ -278,7 +302,8 @@ def fetch_result(job, url):
             raise ValueError('Direct download did not contain FLAC audio')
         update(job, state='ready', filename='track.flac', size=output.stat().st_size, file=str(output))
     finally:
-        raw.unlink(missing_ok=True)
+        browser.command('Fetch.disable')
+        shutil.rmtree(downloads, ignore_errors=True)
         if job['state'] != 'ready':
             output.unlink(missing_ok=True)
 
