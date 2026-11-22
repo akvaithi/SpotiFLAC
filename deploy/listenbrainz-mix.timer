@@ -1,8 +1,8 @@
 [Unit]
-Description=Check ListenBrainz for a fresh discovery playlist
+Description=Refresh the discovery and daily library mixes
 
 [Timer]
-OnCalendar=daily
+OnCalendar=*-*-* 04:15:00 America/Chicago
 Persistent=true
 
 [Install]

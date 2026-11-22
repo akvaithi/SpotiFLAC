@@ -4,15 +4,19 @@
 import collections
 import hashlib
 import json
+import math
 import os
+import random
 import runpy
 import secrets
 import sqlite3
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlencode
 from urllib.request import urlopen
+from zoneinfo import ZoneInfo
 
 helpers = runpy.run_path(Path(__file__).with_name("listenbrainz-mix.py"))
 get = helpers["get"]
@@ -38,14 +42,28 @@ def navidrome(credentials, endpoint, fields=()):
     return response
 
 
-def library_matcher():
+def index_library():
     with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
-        rows = db.execute("select id, title, artist, album, mbz_recording_id from media_file").fetchall()
+        rows = db.execute("""
+            select id, title, artist, album, mbz_recording_id, tags, genre
+            from media_file where not missing order by id
+        """).fetchall()
     by_name = collections.defaultdict(list)
     by_mbid = collections.defaultdict(list)
-    for song_id, title, artist, album, mbid in rows:
+    catalog = {}
+    for song_id, title, artist, album, mbid, raw_tags, raw_genre in rows:
         if title and artist:
-            by_name[normalized(title), primary(artist)].append((song_id, normalized(album or "")))
+            performer = primary(artist)
+            by_name[normalized(title), performer].append((song_id, normalized(album or "")))
+            try:
+                tags = json.loads(raw_tags or "{}")
+            except ValueError:
+                tags = {}
+            genres = {tag["value"].casefold() for tag in tags.get("genre", []) if tag.get("value")}
+            if raw_genre:
+                genres.add(raw_genre.casefold())
+            isrc = next((tag["value"].upper() for tag in tags.get("isrc", []) if tag.get("value")), "")
+            catalog[song_id] = (performer, genres, isrc or (normalized(title), performer))
         if mbid:
             by_mbid[mbid].append((song_id, normalized(album or "")))
 
@@ -57,7 +75,7 @@ def library_matcher():
         unique = album_matches or candidates
         return unique[0][0] if len(unique) == 1 else None
 
-    return match
+    return match, catalog
 
 
 def weekly(account, match):
@@ -102,6 +120,74 @@ def throwbacks(account, match, exclude):
     return selected
 
 
+# Lead with the tags that describe each mix most directly. A smaller weight
+# lets neighboring styles broaden the rotation without taking it over.
+MOODS = {
+    "Late Night": (
+        {"r&b", "alternative r&b", "contemporary r&b", "neo soul", "jazz", "jazz pop", "soul", "downtempo"},
+        {"bedroom pop", "lo-fi", "trip hop"},
+    ),
+    "Chill & Focus": (
+        {"ambient", "lo-fi", "bedroom pop", "indie folk", "easy listening", "acoustic", "instrumental"},
+        {"indie pop", "soundtrack", "jazz", "indie"},
+    ),
+    "High Energy": (
+        {"dance-pop", "electro house", "electropop", "electronic", "dance", "house", "rock", "pop rock", "alternative rock"},
+        {"hip hop", "rap", "pop rap", "indie rock", "synth-pop"},
+    ),
+    "Feel Good": (
+        {"k-pop", "girl group", "boy band", "pop", "mandopop", "c-pop", "filmi"},
+        {"indie pop", "synth-pop", "country", "pop rock"},
+    ),
+}
+
+
+def listening_affinity(account, match, catalog):
+    tracks = collections.Counter()
+    artists = collections.Counter()
+    try:
+        listens = get(base + f"user/{account}/listens?count=1000")["payload"]["listens"]
+    except (OSError, ValueError, KeyError):
+        print("ListenBrainz history unavailable. Using library tags for today's mood mixes.")
+        return tracks, artists
+    for listen in listens:
+        item = listen["track_metadata"]
+        song_id = match(item.get("track_name"), item.get("artist_name"), item.get("release_name") or "")
+        if song_id in catalog:
+            tracks[song_id] += 1
+            artists[catalog[song_id][0]] += 1
+    return tracks, artists
+
+
+def daily_moods(catalog, track_plays, artist_plays, day):
+    used = set()
+    for mood, (core, related) in MOODS.items():
+        rng = random.Random(f"{day.isoformat()}:{mood}")
+        candidates = []
+        for song_id, (artist, tags, recording) in catalog.items():
+            strength = 2 if tags & core else 1 if tags & related else 0
+            if not strength or recording in used:
+                continue
+            affinity = 1 + min(math.log1p(track_plays[song_id]), 2) / 2
+            affinity += min(math.log1p(artist_plays[artist]), 3) / 4
+            # Weighted sampling without replacement. A day's mix stays stable
+            # across restarts, while a new date rotates the selection.
+            score = rng.expovariate(strength * affinity)
+            candidates.append((score, song_id, artist, recording))
+
+        selected = []
+        performer_count = collections.Counter()
+        for _, song_id, artist, recording in sorted(candidates):
+            if performer_count[artist] >= 3 or recording in used:
+                continue
+            selected.append(song_id)
+            performer_count[artist] += 1
+            used.add(recording)
+            if len(selected) == 25:
+                break
+        yield mood, selected
+
+
 def publish(credentials, name, song_ids, comment, existing):
     if not song_ids:
         print(f"{name}: no matching library tracks. Keeping the previous playlist.")
@@ -126,11 +212,16 @@ def main():
     account = quote(os.environ["LISTENBRAINZ_USER"], safe="")
     path = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "navidrome-mix"
     credentials = json.loads(path.read_text())
-    match = library_matcher()
-    jams = weekly(account, match)
-    memories = throwbacks(account, match, set(jams))
+    match, catalog = index_library()
     owned = {p["name"]: p for p in navidrome(credentials, "getPlaylists")["playlists"].get("playlist", [])
              if p.get("owner") == credentials["user"]}
+    track_plays, artist_plays = listening_affinity(account, match, catalog)
+    day = datetime.now(ZoneInfo("America/Chicago")).date()
+    for mood, songs in daily_moods(catalog, track_plays, artist_plays, day):
+        publish(credentials, f"Daily Mix · {mood}", songs,
+                f"Managed daily {mood} mix based on library tags and ListenBrainz listening history.", owned)
+    jams = weekly(account, match)
+    memories = throwbacks(account, match, set(jams))
     publish(credentials, "Weekly Jams · ListenBrainz", jams,
             "Managed mix from ListenBrainz Weekly Jams. Refreshed daily.", owned)
     publish(credentials, "Throwbacks · ListenBrainz", memories,

@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh the ListenBrainz discovery playlist
+Description=Refresh ListenBrainz discovery and library mixes
 Wants=network-online.target
 After=network-online.target
 
@@ -9,7 +9,7 @@ User=akvaithi
 UMask=0077
 EnvironmentFile=/etc/spotiflac/listenbrainz-mix.env
 LoadCredential=navidrome-mix:/etc/spotiflac/navidrome-mix.json
-ExecStart=/usr/bin/python3 /srv/fast/apps/SpotiFLAC/deploy/listenbrainz-mix.py
+ExecStart=-/usr/bin/python3 /srv/fast/apps/SpotiFLAC/deploy/listenbrainz-mix.py
 ExecStart=/usr/bin/python3 /srv/fast/apps/SpotiFLAC/deploy/listenbrainz-library-mixes.py
 TimeoutStartSec=5min
 NoNewPrivileges=true
