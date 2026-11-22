@@ -280,6 +280,8 @@ func (f *subsonicFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.handleStar(w, r)
 	case "stream", "download":
 		f.handleStream(w, r)
+	case "scrobble":
+		f.handleVirtualScrobble(w, r)
 	case "createPlaylist", "updatePlaylist":
 		f.handlePlaylist(w, r)
 	default:

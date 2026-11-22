@@ -2,15 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/akvaithi/SpotiFLAC/backend"
 )
 
 type discoveryMix struct {
@@ -18,28 +22,33 @@ type discoveryMix struct {
 	Tracks     []catalogTrack `json:"tracks"`
 }
 
-// The mix uses an ordinary private Navidrome playlist for its ID and access
-// control. Only decorate playlist rows returned to this caller by Navidrome.
-func (f *subsonicFacade) handleDiscoveryMix(w http.ResponseWriter, r *http.Request) {
+func loadDiscoveryMix() (discoveryMix, time.Time) {
+	var mix discoveryMix
 	config := os.Getenv("CONFIG_DIR")
-	if config == "" || r.Method != http.MethodGet {
-		f.proxy.ServeHTTP(w, r)
-		return
+	if config == "" {
+		return mix, time.Time{}
 	}
 	file, err := os.Open(filepath.Join(config, "listenbrainz-mix.json"))
 	if err != nil {
-		f.proxy.ServeHTTP(w, r)
-		return
+		return mix, time.Time{}
 	}
-	var published time.Time
+	defer file.Close()
+	if json.NewDecoder(io.LimitReader(file, 256<<10)).Decode(&mix) != nil {
+		return discoveryMix{}, time.Time{}
+	}
 	if info, err := file.Stat(); err == nil {
-		published = info.ModTime()
+		return mix, info.ModTime()
 	}
-	var mix discoveryMix
-	err = json.NewDecoder(io.LimitReader(file, 256<<10)).Decode(&mix)
-	_ = file.Close()
+	return mix, time.Time{}
+}
+
+// The mix uses an ordinary private Navidrome playlist for its ID and access
+// control. Only decorate playlist rows returned to this caller by Navidrome.
+func (f *subsonicFacade) handleDiscoveryMix(w http.ResponseWriter, r *http.Request) {
+	mix, published := loadDiscoveryMix()
 	detail := subsonicEndpoint(r.URL.Path) == "getPlaylist"
-	if err != nil || mix.PlaylistID == "" || len(mix.Tracks) == 0 || (detail && r.URL.Query().Get("id") != mix.PlaylistID) {
+	if r.Method != http.MethodGet || mix.PlaylistID == "" || len(mix.Tracks) == 0 ||
+		(detail && r.URL.Query().Get("id") != mix.PlaylistID) {
 		f.proxy.ServeHTTP(w, r)
 		return
 	}
@@ -204,4 +213,89 @@ func newerMixDate(current string, published time.Time) string {
 		return published.UTC().Format(time.RFC3339Nano)
 	}
 	return ""
+}
+
+// A now-playing scrobble is distinct from the media requests Arpeggi may
+// issue while pre-caching. It can prefetch one song without starting a chain
+// that downloads the rest of the playlist.
+func (f *subsonicFacade) handleVirtualScrobble(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	ids := q["id"]
+	if len(ids) != 1 {
+		f.proxy.ServeHTTP(w, r)
+		return
+	}
+	id := ids[0]
+	if _, _, virtual := parseRowID(id); !virtual || !f.authenticated(r) {
+		f.proxy.ServeHTTP(w, r)
+		return
+	}
+	rec := playbackQueueRecord(id)
+	if rec.Status != backend.QueueCompleted {
+		f.proxy.ServeHTTP(w, r)
+		return
+	}
+	realID := f.indexedDownload(r, rec)
+	if realID == "" {
+		f.proxy.ServeHTTP(w, r)
+		return
+	}
+	if q.Get("submission") == "false" {
+		f.prefetchDiscoveryNext(r, id)
+	}
+	proxied := r.Clone(r.Context())
+	q.Set("id", realID)
+	proxied.URL.RawQuery = q.Encode()
+	f.proxy.ServeHTTP(w, proxied)
+}
+
+func discoverySuccessor(mix discoveryMix, current string) (catalogTrack, bool) {
+	for i := 1; i < len(mix.Tracks); i++ {
+		if mix.Tracks[i-1].rowID() == current {
+			next := mix.Tracks[i]
+			id, err := strconv.ParseInt(next.ID, 10, 64)
+			return next, next.Source == catalogDeezer && err == nil && id > 0 && next.Title != "" && next.Artists != ""
+		}
+	}
+	return catalogTrack{}, false
+}
+
+func (f *subsonicFacade) prefetchDiscoveryNext(r *http.Request, current string) {
+	mix, _ := loadDiscoveryMix()
+	next, ok := discoverySuccessor(mix, current)
+	if !ok || mix.PlaylistID == "" || playbackQueueRecord(next.rowID()).Status != "" {
+		return
+	}
+	// Never infer access from the requested track, which is a public catalog ID.
+	q := r.URL.Query()
+	q.Del("time")
+	q.Del("submission")
+	q.Set("f", "json")
+	q.Set("id", mix.PlaylistID)
+	probe := r.Clone(r.Context())
+	probe.URL.Path = "/rest/getPlaylist.view"
+	probe.URL.RawQuery = q.Encode()
+	body, _, err := f.forward(probe)
+	if err != nil {
+		return
+	}
+	var reply struct {
+		Response struct {
+			Status   string
+			Playlist struct {
+				ID     string
+				Public bool
+			}
+		} `json:"subsonic-response"`
+	}
+	if json.Unmarshal(body, &reply) != nil || reply.Response.Status != "ok" ||
+		reply.Response.Playlist.ID != mix.PlaylistID || reply.Response.Playlist.Public {
+		return
+	}
+	f.remember(next)
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := f.acquire(ctx, next.rowID(), nil); err != nil {
+		log.Printf("subsonic facade: could not prefetch the next discovery track: %v", err)
+	}
 }
