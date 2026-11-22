@@ -11,6 +11,7 @@ Type=simple
 ExecStartPre=/usr/bin/install -d -o 1000 -g 1000 -m 0700 /srv/fast/apps/chromium/config/doubledouble
 ExecStartPre=/usr/bin/install -o 1000 -g 1000 -m 0644 /srv/fast/apps/SpotiFLAC/doubledouble-gateway/gateway.py /srv/fast/apps/chromium/config/doubledouble/gateway.py
 ExecStart=/usr/bin/docker exec -u abc -e DD_DISPLAY=:0 chromium python3 /config/doubledouble/gateway.py
+ExecStop=/usr/bin/docker exec -u abc chromium python3 /config/doubledouble/gateway.py --stop
 Restart=always
 RestartSec=10
 

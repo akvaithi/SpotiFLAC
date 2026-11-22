@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import queue
+import signal
 import shutil
 import subprocess
 import threading
@@ -30,6 +31,8 @@ PENDING = queue.Queue()
 # Observe responses rather than inventing or replaying a CAPTCHA answer.
 BOOTSTRAP = r'''
 (() => {
+ if (window.__ddInstalled) return;
+ window.__ddInstalled = true;
  const originalFetch = window.fetch.bind(window);
  window.fetch = async (input, options) => {
    const url = new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -125,7 +128,8 @@ class Browser:
             else:
                 raise RuntimeError('Verification browser did not become ready')
         page = next(p for p in pages if p.get('type') == 'page')
-        self.socket = connect(page['webSocketDebuggerUrl'], max_size=4*1024*1024)
+        self.connection = connect(page['webSocketDebuggerUrl'], max_size=4*1024*1024)
+        self.socket = self.connection.__enter__()
         self.sequence = 0
         self.command('Page.enable')
         self.script = self.command('Page.addScriptToEvaluateOnNewDocument', {'source': BOOTSTRAP})['identifier']
@@ -151,7 +155,7 @@ class Browser:
             self.command('Page.removeScriptToEvaluateOnNewDocument', {'identifier': self.script})
             self.command('Page.navigate', {'url': 'about:blank'})
         finally:
-            self.socket.close()
+            self.connection.__exit__(None, None, None)
 
 
 def update(job, **fields):
@@ -328,6 +332,34 @@ class Handler(BaseHTTPRequestHandler):
         return self.respond({'ok': True})
 
 
+def stop_previous():
+    try:
+        pid = int((HOME / 'gateway.pid').read_text())
+        command = Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+        if b'/config/doubledouble/gateway.py' in command:
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+
+
 if __name__ == '__main__':
+    import sys
+    if '--stop' in sys.argv:
+        stop_previous()
+        sys.exit(0)
+    HOME.mkdir(parents=True, exist_ok=True)
+    server = ThreadingHTTPServer(('0.0.0.0', 8782), Handler)
+    (HOME / 'gateway.pid').write_text(str(os.getpid()))
     threading.Thread(target=worker, daemon=True).start()
-    ThreadingHTTPServer(('0.0.0.0', 8782), Handler).serve_forever()
+    def shutdown(*_):
+        with LOCK:
+            for job in JOBS.values():
+                job['cancel'].set()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        (HOME / 'gateway.pid').unlink(missing_ok=True)
